@@ -11,9 +11,11 @@ from buddelkiste.cli import (
     RWBindConfig,
     add_bind_to_config,
     ensure_cwd_in_sandbox,
+    get_binds,
     get_env_args,
     load_config,
 )
+from buddelkiste.features import FEATURE_NAMES
 
 
 def test_load_config_missing_returns_empty(tmp_config: Path) -> None:
@@ -147,3 +149,32 @@ def test_ensure_cwd_abort(
     monkeypatch.setattr("click.prompt", lambda *a, **k: "no")
     with pytest.raises(click.Abort):
         ensure_cwd_in_sandbox([])
+
+
+def test_add_bind_to_config_escapes_special_chars(
+    tmp_config: Path, tmp_path: Path
+) -> None:
+    source = tmp_path / 'proj"quote\\slash'
+    source.mkdir()
+    add_bind_to_config(source, read_only=True)
+    data = tomllib.loads(tmp_config.read_text(encoding="utf-8"))
+    assert data["binds"][0]["source"] == str(source)
+
+
+def test_permanent_bind_roundtrip(
+    tmp_config: Path,
+    tmp_path: Path,
+    runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    source = tmp_path / "proj"
+    source.mkdir()
+    add_bind_to_config(source, read_only=False)
+
+    config = load_config()
+    binds = get_binds(config, {name: False for name in FEATURE_NAMES})
+    assert any(
+        isinstance(bind, RWBindConfig) and Path(bind.source) == source for bind in binds
+    )
