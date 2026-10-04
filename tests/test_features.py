@@ -12,6 +12,7 @@ from buddelkiste.features import (
     base_binds,
     clear_feature_caches,
     cursor_binds,
+    dbus_binds,
     enabled_feature_names,
     expand_bind_path,
     feature_binds,
@@ -22,6 +23,8 @@ from buddelkiste.features import (
     load_feature_registry,
     python_binds,
     resolve_features,
+    user_binds,
+    xdg_open_binds,
 )
 
 
@@ -29,8 +32,12 @@ def test_feature_catalog_is_topic_oriented() -> None:
     assert "cursor" in FEATURES
     assert "python" in FEATURES
     assert "ssh" in FEATURES
+    assert "dbus" in FEATURES
+    assert "xdg-open" in FEATURES
+    assert "user" in FEATURES
+    assert "locale" in FEATURES
+    assert "term" in FEATURES
     # Type-oriented names should not be features.
-    assert "dbus" not in FEATURES
     assert "gpu" not in FEATURES
     assert "audio" not in FEATURES
     assert "display" not in FEATURES
@@ -223,7 +230,8 @@ def test_feature_binds_include_only_enabled_topics(
     sources = {getattr(b, "source", None) for b in binds}
     assert str(home / ".pip") in sources
     assert str(home / ".cursor") not in sources
-    assert str(home / ".cache") in sources  # base
+    assert str(home / ".cache") not in sources
+    assert "/usr" in sources  # base
 
 
 def test_base_binds_always_present(
@@ -233,7 +241,11 @@ def test_base_binds_always_present(
     (tmp_path / "home").mkdir()
     sources = {getattr(b, "source", None) for b in base_binds()}
     assert "/usr" in sources
-    assert str(tmp_path / "home" / ".local") in sources
+    assert str(tmp_path / "home" / ".local") not in sources
+    assert str(tmp_path / "home" / ".cache") not in sources
+    assert "/usr/libexec/flatpak-xdg-utils/xdg-open" not in sources
+    assert "/run/dbus/system_bus_socket" not in sources
+    assert str(runtime_dir / "bus") not in sources
 
 
 def test_topic_bind_helpers(
@@ -244,6 +256,77 @@ def test_topic_bind_helpers(
     monkeypatch.setenv("HOME", str(home))
     assert any(getattr(b, "source", None) == "/opt/cursor-agent" for b in cursor_binds())
     assert any(str(home / ".pip") == getattr(b, "source", None) for b in python_binds())
+    dbus_sources = {getattr(b, "source", None) for b in dbus_binds()}
+    assert "/run/dbus/system_bus_socket" in dbus_sources
+    assert str(runtime_dir / "bus") in dbus_sources
+    assert str(runtime_dir / "dbus-1") in dbus_sources
+    assert any(
+        getattr(b, "source", None) == "/usr/libexec/flatpak-xdg-utils/xdg-open"
+        for b in xdg_open_binds()
+    )
+    user_sources = {getattr(b, "source", None) for b in user_binds()}
+    assert str(home / ".local") in user_sources
+    assert str(home / ".cache") in user_sources
+
+
+def test_dbus_feature_binds_and_env(
+    tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+
+    enabled = {name: False for name in FEATURE_NAMES}
+    sources_off = {getattr(b, "source", None) for b in feature_binds(enabled)}
+    assert "/run/dbus/system_bus_socket" not in sources_off
+    assert "DBUS_SESSION_BUS_ADDRESS" not in feature_env_var_names(enabled)
+
+    enabled["dbus"] = True
+    sources_on = {getattr(b, "source", None) for b in feature_binds(enabled)}
+    assert "/run/dbus/system_bus_socket" in sources_on
+    assert str(runtime_dir / "bus") in sources_on
+    assert "DBUS_SESSION_BUS_ADDRESS" in feature_env_var_names(enabled)
+
+
+def test_user_and_xdg_open_features(
+    tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    enabled = {name: False for name in FEATURE_NAMES}
+    sources_off = {getattr(b, "source", None) for b in feature_binds(enabled)}
+    assert str(home / ".local") not in sources_off
+    assert str(home / ".cache") not in sources_off
+    assert "/usr/libexec/flatpak-xdg-utils/xdg-open" not in sources_off
+
+    enabled["user"] = True
+    enabled["xdg-open"] = True
+    sources_on = {getattr(b, "source", None) for b in feature_binds(enabled)}
+    assert str(home / ".local") in sources_on
+    assert str(home / ".cache") in sources_on
+    assert "/usr/libexec/flatpak-xdg-utils/xdg-open" in sources_on
+
+
+def test_locale_and_term_env_features() -> None:
+    enabled = {name: False for name in FEATURE_NAMES}
+    names_off = feature_env_var_names(enabled)
+    assert "LANG" not in names_off
+    assert "TERM" not in names_off
+    assert "EDITOR" not in names_off
+    assert "HOME" in names_off  # base
+
+    enabled["locale"] = True
+    enabled["term"] = True
+    names_on = feature_env_var_names(enabled)
+    assert "LANG" in names_on
+    assert "LC_NUMERIC" in names_on
+    assert "LC_TIME" in names_on
+    assert "COLORTERM" in names_on
+    assert "EDITOR" in names_on
+    assert "TERM" in names_on
+    assert "TERMINFO" in names_on
+    assert "TERM_PROGRAM" in names_on
 
 
 def test_feature_env_vars_follow_topics() -> None:
@@ -252,6 +335,9 @@ def test_feature_env_vars_follow_topics() -> None:
     names = feature_env_var_names(enabled)
     assert "VIRTUAL_ENV" in names
     assert "DOCKER_HOST" not in names
+    assert "DBUS_SESSION_BUS_ADDRESS" not in names
+    assert "LANG" not in names
+    assert "TERM" not in names
     assert "HOME" in names  # base
 
 
@@ -260,6 +346,10 @@ def test_format_features_help_lists_topics() -> None:
     assert "cursor" in text
     assert "python" in text
     assert "gui" in text
+    assert "xdg-open" in text
+    assert "user" in text
+    assert "locale" in text
+    assert "term" in text
     assert "default: on" in text
     assert "buddelkiste.features:CURSOR" in text
     assert "buddelkiste.features:PYTHON" in text

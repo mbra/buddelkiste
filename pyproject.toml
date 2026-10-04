@@ -17,15 +17,20 @@ bk = "buddelkiste.cli:cli"
 [project.entry-points."buddelkiste.features"]
 asdf = "buddelkiste.features:ASDF"
 cursor = "buddelkiste.features:CURSOR"
+dbus = "buddelkiste.features:DBUS"
 docker = "buddelkiste.features:DOCKER"
 git = "buddelkiste.features:GIT"
 google = "buddelkiste.features:GOOGLE"
 gui = "buddelkiste.features:GUI"
 java = "buddelkiste.features:JAVA"
+locale = "buddelkiste.features:LOCALE"
 node = "buddelkiste.features:NODE"
 nvim = "buddelkiste.features:NVIM"
 python = "buddelkiste.features:PYTHON"
 ssh = "buddelkiste.features:SSH"
+term = "buddelkiste.features:TERM"
+user = "buddelkiste.features:USER"
+xdg-open = "buddelkiste.features:XDG_OPEN"
 
 [build-system]
 requires = ["hatchling"]

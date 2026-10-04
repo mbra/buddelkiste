@@ -64,7 +64,6 @@ def _home() -> Path:
 def base_binds() -> list:
     """Always-on mounts required for a usable sandbox."""
     runtime = _runtime()
-    home = _home()
     return [
         ("--dev", "/dev"),
         ("--proc", "/proc"),
@@ -72,12 +71,7 @@ def base_binds() -> list:
         Tmpfs("/run"),
         Tmpfs("/tmp"),
         ("--dir", str(runtime)),
-        ("--dir", "/run/dbus"),
-        ROBindConfig("/run/dbus/system_bus_socket"),
-        ROBindConfig(runtime / "bus"),
-        RWBindConfig(runtime / "dbus-1"),
         ROBindConfig("/usr"),
-        ROBindConfig("/usr/libexec/flatpak-xdg-utils/xdg-open", "/usr/bin/xdg-open"),
         ROBindConfig("/lib"),
         ROBindConfig("/lib64"),
         ROBindConfig("/bin"),
@@ -88,27 +82,40 @@ def base_binds() -> list:
         ROBindConfig("/etc/group"),
         ROBindConfig("/etc/alternatives"),
         ROBindConfig("/etc/ca-certificates"),
-        ROBindConfig(home / ".local"),
-        RWBindConfig(home / ".cache"),
     ]
 
 
 BASE_ENV_VARS = (
-    "COLORTERM",
-    "DBUS_SESSION_BUS_ADDRESS",
-    "EDITOR",
     "HOME",
-    "LANG",
-    "LC_NUMERIC",
-    "LC_TIME",
     "PATH",
     "SHELL",
-    "TERM",
-    "TERMINFO",
-    "TERM_PROGRAM",
     "XDG_CONFIG_HOME",
     "XDG_RUNTIME_DIR",
 )
+
+
+def dbus_binds() -> list:
+    runtime = _runtime()
+    return [
+        ("--dir", "/run/dbus"),
+        ROBindConfig("/run/dbus/system_bus_socket"),
+        ROBindConfig(runtime / "bus"),
+        RWBindConfig(runtime / "dbus-1"),
+    ]
+
+
+def xdg_open_binds() -> list:
+    return [
+        ROBindConfig("/usr/libexec/flatpak-xdg-utils/xdg-open", "/usr/bin/xdg-open"),
+    ]
+
+
+def user_binds() -> list:
+    home = _home()
+    return [
+        ROBindConfig(home / ".local"),
+        RWBindConfig(home / ".cache"),
+    ]
 
 
 def cursor_binds() -> list:
@@ -364,6 +371,37 @@ GUI = Feature(
     binds=gui_binds,
     origin="buddelkiste.features:GUI",
 )
+DBUS = Feature(
+    name="dbus",
+    description="D-Bus session and system bus sockets",
+    env_vars=("DBUS_SESSION_BUS_ADDRESS",),
+    binds=dbus_binds,
+    origin="buddelkiste.features:DBUS",
+)
+XDG_OPEN = Feature(
+    name="xdg-open",
+    description="Host xdg-open via flatpak-xdg-utils",
+    binds=xdg_open_binds,
+    origin="buddelkiste.features:XDG_OPEN",
+)
+USER = Feature(
+    name="user",
+    description="User ~/.local (ro) and ~/.cache (rw)",
+    binds=user_binds,
+    origin="buddelkiste.features:USER",
+)
+LOCALE = Feature(
+    name="locale",
+    description="Locale environment variables",
+    env_vars=("LANG", "LC_NUMERIC", "LC_TIME"),
+    origin="buddelkiste.features:LOCALE",
+)
+TERM = Feature(
+    name="term",
+    description="Terminal and editor environment variables",
+    env_vars=("COLORTERM", "EDITOR", "TERM", "TERMINFO", "TERM_PROGRAM"),
+    origin="buddelkiste.features:TERM",
+)
 
 
 def _load_entry_point_object(ep) -> Feature:
@@ -406,6 +444,11 @@ def _builtin_feature_fallback() -> dict[str, Feature]:
             NVIM,
             GOOGLE,
             GUI,
+            DBUS,
+            XDG_OPEN,
+            USER,
+            LOCALE,
+            TERM,
         )
     }
 
