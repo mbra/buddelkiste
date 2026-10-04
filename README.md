@@ -251,5 +251,5 @@ uv run pytest -m requires_tun # filter/pasta e2e (needs /dev/net/tun)
 Integration layout:
 
 - `tests/` — unit/contract tests (mocked subprocess where needed)
-- `tests/integ/` — nested-safe real `bwrap` (`host`/`none`), binds/env isolation, nested `nft`
-- `tests/integ_net/` — filter-mode e2e via pasta/slirp; skipped without `/dev/net/tun`
+- `tests/integ/` — nested-safe real `bwrap` (`host`/`none`), binds/env isolation, nested `nft` + DNS proxy/`nft add element`/`UDP/53` redirect against real tools
+- `tests/integ_net/` — filter-mode e2e via pasta/slirp (allow/deny IP & host, guest caps); skipped without `/dev/net/tun`

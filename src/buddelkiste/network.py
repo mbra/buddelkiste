@@ -401,8 +401,6 @@ def build_nft_ruleset(
     default_policy = "accept" if net.policy == "allow" else "drop"
 
     def set_elements(items: list[str]) -> str:
-        if not items:
-            return ""
         return ", ".join(items)
 
     lines = [
