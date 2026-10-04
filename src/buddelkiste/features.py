@@ -342,31 +342,100 @@ FEATURES: dict[str, Feature] = {
 FEATURE_NAMES = tuple(FEATURES)
 
 
+def _unknown_feature_message(name: str, where: str = "") -> str:
+    if where:
+        return f"Unknown feature {where}: {name}"
+    return f"Unknown feature: {name}"
+
+
+def apply_feature_spec(enabled: dict[str, bool], spec, *, where: str) -> None:
+    """Apply a config feature spec in place.
+
+    A list sets the enabled set exactly (allowlist). A table applies boolean
+    overrides on the current set.
+    """
+    if isinstance(spec, list):
+        unknown = [name for name in spec if name not in FEATURES]
+        if unknown:
+            raise click.ClickException(_unknown_feature_message(", ".join(unknown), where))
+        selected = set(spec)
+        for name in FEATURES:
+            enabled[name] = name in selected
+        return
+
+    if isinstance(spec, dict):
+        for name, value in spec.items():
+            if name not in FEATURES:
+                raise click.ClickException(_unknown_feature_message(name, where))
+            enabled[name] = bool(value)
+        return
+
+    raise click.ClickException(
+        f"Invalid features {where}: expected a list or table, got {type(spec).__name__}"
+    )
+
+
+def lookup_executable_config(config: dict, executable: str | None) -> dict | None:
+    """Return the config table for an executable, if any.
+
+    Matches the full executable string first, then its basename.
+    """
+    if not executable:
+        return None
+
+    executables = config.get("executables")
+    if not isinstance(executables, dict):
+        return None
+
+    if executable in executables:
+        entry = executables[executable]
+        return entry if isinstance(entry, dict) else None
+
+    basename = Path(executable).name
+    if basename in executables:
+        entry = executables[basename]
+        return entry if isinstance(entry, dict) else None
+
+    return None
+
+
 def resolve_features(
     config: dict,
     *,
+    executable: str | None = None,
     enable: Sequence[str] = (),
     disable: Sequence[str] = (),
 ) -> dict[str, bool]:
     """Resolve which features are enabled.
 
-    Precedence: CLI --no-feature / --feature, then config [features], then defaults.
+    Precedence (later wins for CLI flags):
+    1. feature defaults
+    2. global config ``features`` (list allowlist or table overrides)
+    3. per-executable config ``executables.<name>.features`` when an executable
+       is provided
+    4. CLI ``--feature`` / ``--no-feature``
     """
     enabled = {name: feature.default for name, feature in FEATURES.items()}
 
-    for name, value in config.get("features", {}).items():
-        if name not in FEATURES:
-            raise click.ClickException(f"Unknown feature in config: {name}")
-        enabled[name] = bool(value)
+    if "features" in config:
+        apply_feature_spec(enabled, config["features"], where="in config")
+
+    exec_cfg = lookup_executable_config(config, executable)
+    if exec_cfg is not None and "features" in exec_cfg:
+        apply_feature_spec(
+            enabled,
+            exec_cfg["features"],
+            where=f"for executable {executable!r}",
+        )
 
     for name in enable:
         if name not in FEATURES:
-            raise click.ClickException(f"Unknown feature: {name}")
+            raise click.ClickException(_unknown_feature_message(name))
         enabled[name] = True
 
     for name in disable:
         if name not in FEATURES:
-            raise click.ClickException(f"Unknown feature: {name}")
+            raise click.ClickException(_unknown_feature_message(name))
         enabled[name] = False
 
     return enabled

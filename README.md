@@ -20,7 +20,8 @@ bk --feature python --feature ssh python myscript.py
 Wrapper options: `--debug`, `--feature` / `--no-feature`, `--list-features`.
 Everything else is the sandboxed command.
 
-Configuration: `~/.config/buddelkiste/config.toml` (features, binds, envvars). See `bk --help`.
+Configuration (`~/.config/buddelkiste/config.toml`) can set a global feature list/table
+and per-executable overrides under `[executables.<name>]`. See `bk --help`.
 
 ## Development
 

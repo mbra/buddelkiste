@@ -101,3 +101,31 @@ def test_cli_disables_feature_via_flag(
     result = CliRunner().invoke(cli, ["--no-feature", "python", "--no-feature", "ssh", "/bin/true"])
     assert result.exit_code == 0, result.output
     assert "VIRTUAL_ENV" not in captured["args"]
+
+
+def test_cli_uses_per_executable_features(
+    prepared_cwd: Path,
+    tmp_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_config.write_text(
+        'features = ["git"]\n\n'
+        '[executables."/bin/true"]\n'
+        'features = ["python"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("VIRTUAL_ENV", "/tmp/venv")
+    monkeypatch.setenv("DOCKER_HOST", "unix:///tmp/docker.sock")
+
+    captured: dict = {}
+
+    def fake_run(args, check=False):
+        captured["args"] = list(args)
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr("buddelkiste.cli.subprocess.run", fake_run)
+
+    result = CliRunner().invoke(cli, ["--no-feature", "ssh", "/bin/true"])
+    assert result.exit_code == 0, result.output
+    assert "VIRTUAL_ENV" in captured["args"]
+    assert "DOCKER_HOST" not in captured["args"]

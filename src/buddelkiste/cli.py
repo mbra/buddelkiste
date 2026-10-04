@@ -12,8 +12,11 @@ can be inspected.
 
 Optional permission sets are grouped by topic (cursor, python, ssh, ...). All
 are enabled by default. Toggle them with --feature / --no-feature, or in
-~/.config/buddelkiste/config.toml under [features]. Use --list-features to print the
-catalog.
+~/.config/buddelkiste/config.toml. Use --list-features to print the catalog.
+
+Config may set features globally and per executable (matched by path or
+basename of the command being started). A list selects exactly those features;
+a table applies true/false overrides.
 
 
 # Configuration
@@ -21,7 +24,11 @@ catalog.
 Additional configuration is read from ~/.config/buddelkiste/config.toml. The file
 supports the following top-level keys:
 
-features: Table of feature name = true/false overrides.
+features: Global feature selection. Either a list of feature names (allowlist)
+or a table of feature name = true/false overrides.
+
+executables: Table keyed by executable path or basename. Each entry may contain
+a features list or table applied when that executable is started.
 
 binds: List of additional bind mounts for the sandbox with "source", "target"
 and "read_only" keys. The "source" key is mandatory and gives the host directory
@@ -36,9 +43,19 @@ envvars: List of additional environment variables for the sandbox. The mandatory
 ## Example for a ~/.config/buddelkiste/config.toml configuration
 
 \b
-  [features]
-  gui = false
-  google = false
+  # Global allowlist (exactly these features)
+  features = ["git", "ssh", "python"]
+
+  # Or global overrides on the defaults:
+  # [features]
+  # gui = false
+  # google = false
+
+  [executables.cursor-agent]
+  features = ["cursor", "git", "ssh", "gui"]
+
+  [executables.python]
+  features = ["python", "git"]
 
   [[binds]]
   source = "/path/to/directory"  # path is whitelisted for the sandbox
@@ -138,14 +155,16 @@ def cli(
         raise SystemExit(0)
 
     config = load_config()
+    command = resolve_launch_command(args)
+    executable = command_executable(command, args)
     enabled = resolve_features(
         config,
+        executable=executable,
         enable=enable_features,
         disable=disable_features,
     )
     binds = get_binds(config, enabled)
     env_args = get_env_args(config, enabled)
-    command = resolve_launch_command(args)
 
     ensure_cwd_in_sandbox(binds)
 
@@ -301,6 +320,13 @@ def resolve_launch_command(args: list[str]) -> list[str]:
 
     pwent = pwd.getpwuid(os.getuid())
     return [pwent.pw_shell, "-si", "--"]
+
+
+def command_executable(command: list[str], args: list[str]) -> str | None:
+    """Executable used for per-command feature config, if the user provided one."""
+    if not args:
+        return None
+    return command[0]
 
 
 def log_cmdline(cmdline):

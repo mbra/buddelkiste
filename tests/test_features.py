@@ -37,7 +37,7 @@ def test_resolve_features_defaults_all_enabled() -> None:
     assert enabled_feature_names(enabled) == list(FEATURE_NAMES)
 
 
-def test_resolve_features_config_and_cli_precedence() -> None:
+def test_resolve_features_config_table_and_cli_precedence() -> None:
     enabled = resolve_features(
         {"features": {"gui": False, "python": False}},
         enable=["python"],
@@ -49,14 +49,68 @@ def test_resolve_features_config_and_cli_precedence() -> None:
     assert enabled["cursor"] is True
 
 
+def test_resolve_features_global_list_is_allowlist() -> None:
+    enabled = resolve_features({"features": ["git", "ssh"]})
+    assert enabled["git"] is True
+    assert enabled["ssh"] is True
+    assert enabled["python"] is False
+    assert enabled["cursor"] is False
+
+
+def test_resolve_features_per_executable_list() -> None:
+    config = {
+        "features": ["git"],
+        "executables": {
+            "cursor-agent": {"features": ["cursor", "ssh"]},
+            "/usr/bin/python": {"features": ["python", "git"]},
+        },
+    }
+    by_basename = resolve_features(config, executable="/opt/bin/cursor-agent")
+    assert by_basename["cursor"] is True
+    assert by_basename["ssh"] is True
+    assert by_basename["git"] is False
+
+    by_path = resolve_features(config, executable="/usr/bin/python")
+    assert by_path["python"] is True
+    assert by_path["git"] is True
+    assert by_path["cursor"] is False
+
+    # No executable → global only (shell fallback).
+    global_only = resolve_features(config, executable=None)
+    assert global_only["git"] is True
+    assert global_only["cursor"] is False
+
+
+def test_resolve_features_per_executable_table_overrides_global() -> None:
+    enabled = resolve_features(
+        {
+            "features": ["git", "ssh", "python"],
+            "executables": {
+                "python": {"features": {"docker": True, "ssh": False}},
+            },
+        },
+        executable="python",
+    )
+    assert enabled["git"] is True
+    assert enabled["python"] is True
+    assert enabled["docker"] is True
+    assert enabled["ssh"] is False
+
+
 def test_resolve_features_unknown_raises() -> None:
     with pytest.raises(click.ClickException, match="Unknown feature in config"):
         resolve_features({"features": {"nope": True}})
+    with pytest.raises(click.ClickException, match="Unknown feature in config"):
+        resolve_features({"features": ["nope"]})
     with pytest.raises(click.ClickException, match="Unknown feature: nope"):
         resolve_features({}, enable=["nope"])
     with pytest.raises(click.ClickException, match="Unknown feature: nope"):
         resolve_features({}, disable=["nope"])
-
+    with pytest.raises(click.ClickException, match="for executable"):
+        resolve_features(
+            {"executables": {"foo": {"features": ["nope"]}}},
+            executable="foo",
+        )
 
 def test_feature_binds_include_only_enabled_topics(
     tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
