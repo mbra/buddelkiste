@@ -65,6 +65,40 @@ def test_resolve_network_defaults() -> None:
     assert net.deny == []
 
 
+def test_resolve_network_implies_filter_from_cli_options() -> None:
+    assert resolve_network({}, allow=["1.1.1.1/32"]).mode == "filter"
+    assert resolve_network({}, deny=["10.0.0.0/8"]).mode == "filter"
+    assert resolve_network({}, deny_presets=["metadata"]).mode == "filter"
+    assert resolve_network({}, policy="allow").mode == "filter"
+
+
+def test_resolve_network_implies_filter_from_config_without_mode() -> None:
+    net = resolve_network({"network": {"allow": ["1.1.1.1/32"]}})
+    assert net.mode == "filter"
+    assert net.allow == ["1.1.1.1/32"]
+
+    presets = resolve_network({"network": {"deny_presets": ["private"]}})
+    assert presets.mode == "filter"
+    assert "10.0.0.0/8" in presets.deny
+
+    policy_only = resolve_network({"network": {"policy": "allow"}})
+    assert policy_only.mode == "filter"
+    assert policy_only.policy == "allow"
+
+
+def test_resolve_network_explicit_mode_wins() -> None:
+    assert resolve_network({}, mode="host", allow=["1.1.1.1/32"]).mode == "host"
+    assert resolve_network({}, mode="none", deny_presets=["metadata"]).mode == "none"
+    assert resolve_network(
+        {"network": {"mode": "host", "allow": ["1.1.1.1/32"]}}
+    ).mode == "host"
+    # CLI filter flags still upgrade when config mode is host but --network omitted.
+    assert resolve_network(
+        {"network": {"mode": "host"}},
+        allow=["1.1.1.1/32"],
+    ).mode == "filter"
+
+
 def test_deny_presets_expand() -> None:
     assert "10.0.0.0/8" in expand_deny_presets(["private"])
     assert "169.254.169.254/32" in expand_deny_presets(["metadata"])

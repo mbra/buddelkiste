@@ -140,6 +140,16 @@ def test_cli_network_filter_flags(
     assert net.deny == ["169.254.169.254/32"]
 
 
+def test_cli_net_allow_implies_filter(prepared_cwd: Path, fake_bwrap) -> None:
+    result = CliRunner().invoke(
+        cli,
+        ["--no-feature", "ssh", "--net-allow", "1.1.1.1/32", "/bin/true"],
+    )
+    assert result.exit_code == 0, result.output
+    assert fake_bwrap["nets"][0].mode == "filter"
+    assert fake_bwrap["nets"][0].allow == ["1.1.1.1/32"]
+
+
 def test_cli_network_none_mode(prepared_cwd: Path, fake_bwrap) -> None:
     result = CliRunner().invoke(cli, ["--no-feature", "ssh", "--network", "none", "/bin/true"])
     assert result.exit_code == 0, result.output

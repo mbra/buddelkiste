@@ -253,6 +253,23 @@ def parse_network_table(
     return cfg.normalized(registry)
 
 
+def _effective_network_table(config: dict, executable: str | None) -> dict | None:
+    exec_cfg = lookup_executable_config(config, executable)
+    if exec_cfg is not None and isinstance(exec_cfg.get("network"), dict):
+        return exec_cfg["network"]
+    network = config.get("network")
+    return network if isinstance(network, dict) else None
+
+
+def _config_requests_filter(network: dict | None) -> bool:
+    """True when a config network table uses filtering knobs."""
+    if not network:
+        return False
+    if network.get("allow") or network.get("deny") or network.get("deny_presets"):
+        return True
+    return "policy" in network
+
+
 def resolve_network(
     config: dict,
     *,
@@ -269,10 +286,15 @@ def resolve_network(
     CLI ``--net-allow`` / ``--net-deny`` / ``--net-deny-preset`` append to the
     lists; ``--network`` / ``--net-policy`` override mode/policy when given.
 
+    Filter mode is selected automatically when filtering options are used, unless
+    ``--network`` (or an explicit config ``mode``) chooses another mode.
+
     Custom named deny presets may be defined under ``[network.presets]`` as
     ``name = ["IP/CIDR or hostname", ...]`` and referenced like built-ins.
     """
     registry = load_deny_preset_registry(config)
+    network_table = _effective_network_table(config, executable)
+    mode_from_config = bool(network_table and "mode" in network_table)
     net = NetworkConfig()
     if "network" in config:
         net = parse_network_table(config["network"], where="in config", registry=registry)
@@ -306,6 +328,12 @@ def resolve_network(
         net.deny.extend(deny)
     if deny_presets:
         net.deny_presets.extend(deny_presets)
+
+    cli_filter = bool(policy is not None or allow or deny or deny_presets)
+    if mode is None and (
+        cli_filter or (not mode_from_config and _config_requests_filter(network_table))
+    ):
+        net.mode = "filter"
 
     return net.normalized(registry)
 

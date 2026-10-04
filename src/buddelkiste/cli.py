@@ -23,7 +23,9 @@ a table applies true/false overrides.
 
 Modes: host (default, share host network), none (no connectivity), filter
 (private netns via pasta or slirp4netns with in-namespace nftables IP/CIDR
-allow/deny). Filter mode needs no root and no reserved host subnets.
+allow/deny). Filter mode is selected automatically when allow/deny/policy
+options are used, unless --network or config mode says otherwise. Filter mode
+needs no root and no reserved host subnets.
 
 In filter mode, nameserver IPs from /etc/resolv.conf are auto-allowed so DNS
 keeps working under a default-deny policy. Rules may be IP/CIDR literals or
@@ -181,28 +183,30 @@ CONFIG_PATH = Path("~/.config/buddelkiste/config.toml")
     "network_mode",
     type=click.Choice(["host", "none", "filter"], case_sensitive=False),
     default=None,
-    help="Network mode: host (default), none, or filter.",
+    help="Network mode: host (default), none, or filter. Filter is implied by "
+    "allow/deny/policy options.",
 )
 @click.option(
     "--net-policy",
     type=click.Choice(["allow", "deny"], case_sensitive=False),
     default=None,
-    help="Default verdict for filter mode (allow or deny).",
+    help="Default verdict for filter mode (allow or deny). Implies --network filter.",
 )
 @click.option(
     "--net-allow",
     multiple=True,
-    help="Allow an IP/CIDR or hostname in filter mode (repeatable).",
+    help="Allow an IP/CIDR or hostname (implies --network filter; repeatable).",
 )
 @click.option(
     "--net-deny",
     multiple=True,
-    help="Deny an IP/CIDR or hostname in filter mode (repeatable).",
+    help="Deny an IP/CIDR or hostname (implies --network filter; repeatable).",
 )
 @click.option(
     "--net-deny-preset",
     multiple=True,
-    help="Deny a named preset (built-in or from [network.presets]). Repeatable.",
+    help="Deny a named preset (built-in or from [network.presets]). "
+    "Implies --network filter. Repeatable.",
 )
 @click.option(
     "--list-net-presets",
