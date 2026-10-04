@@ -52,7 +52,7 @@ class Feature:
     env_vars: tuple[str, ...] = ()
     binds: Callable[[], list] = field(default_factory=lambda: lambda: [])
     setup: Callable[[], AbstractContextManager[Sequence[str]]] | None = None
-    # Module path or config location shown in --list-features.
+    # Module path or config location shown in `bk list-features`.
     origin: str = ""
 
 

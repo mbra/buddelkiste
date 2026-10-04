@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import pwd
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 from click.testing import CliRunner
@@ -42,7 +41,7 @@ def test_cli_runs_bwrap_with_command(
     prepared_cwd: Path,
     fake_bwrap,
 ) -> None:
-    result = CliRunner().invoke(cli, ["--no-feature", "ssh", "/bin/echo", "hello"])
+    result = CliRunner().invoke(cli, ["run", "--no-feature", "ssh", "/bin/echo", "hello"])
     assert result.exit_code == 42, result.output
     assert fake_bwrap["args"][:1] == ["bwrap"]
     assert "--share-net" not in fake_bwrap["args"]  # added inside run_bwrap for host
@@ -55,7 +54,7 @@ def test_cli_shell_fallback_when_no_args(
     prepared_cwd: Path,
     fake_bwrap,
 ) -> None:
-    result = CliRunner().invoke(cli, ["--no-feature", "ssh"])
+    result = CliRunner().invoke(cli, ["run", "--no-feature", "ssh"])
     assert result.exit_code == 0, result.output
     shell = pwd.getpwuid(os.getuid()).pw_shell
     assert fake_bwrap["args"][-4:] == ["--", shell, "-si", "--"]
@@ -65,10 +64,12 @@ def test_cli_forwards_help_to_command(
     prepared_cwd: Path,
     fake_bwrap,
 ) -> None:
-    result = CliRunner().invoke(cli, ["--no-feature", "ssh", "cursor-agent", "--help"])
+    result = CliRunner().invoke(
+        cli, ["run", "--no-feature", "ssh", "cursor-agent", "--help"]
+    )
     assert result.exit_code == 0, result.output
     assert fake_bwrap["args"][-3:] == ["--", "cursor-agent", "--help"]
-    assert "Sandbox a command using bubblewrap" not in result.output
+    assert "Run a command inside a bubblewrap sandbox" not in result.output
 
 
 def test_cli_list_features(tmp_config: Path) -> None:
@@ -78,7 +79,7 @@ def test_cli_list_features(tmp_config: Path) -> None:
         'env = ["CARGO_HOME"]\n',
         encoding="utf-8",
     )
-    result = CliRunner().invoke(cli, ["--list-features"])
+    result = CliRunner().invoke(cli, ["list-features"])
     assert result.exit_code == 0
     assert "cursor" in result.output
     assert "python" in result.output
@@ -94,7 +95,9 @@ def test_cli_disables_feature_via_flag(
 ) -> None:
     monkeypatch.setenv("VIRTUAL_ENV", "/tmp/venv")
 
-    result = CliRunner().invoke(cli, ["--no-feature", "python", "--no-feature", "ssh", "/bin/true"])
+    result = CliRunner().invoke(
+        cli, ["run", "--no-feature", "python", "--no-feature", "ssh", "/bin/true"]
+    )
     assert result.exit_code == 0, result.output
     assert "VIRTUAL_ENV" not in fake_bwrap["args"]
 
@@ -114,7 +117,7 @@ def test_cli_uses_per_executable_features(
     monkeypatch.setenv("VIRTUAL_ENV", "/tmp/venv")
     monkeypatch.setenv("DOCKER_HOST", "unix:///tmp/docker.sock")
 
-    result = CliRunner().invoke(cli, ["--no-feature", "ssh", "/bin/true"])
+    result = CliRunner().invoke(cli, ["run", "--no-feature", "ssh", "/bin/true"])
     assert result.exit_code == 0, result.output
     assert "VIRTUAL_ENV" in fake_bwrap["args"]
     assert "DOCKER_HOST" not in fake_bwrap["args"]
@@ -127,6 +130,7 @@ def test_cli_network_filter_flags(
     result = CliRunner().invoke(
         cli,
         [
+            "run",
             "--no-feature",
             "ssh",
             "--network",
@@ -152,7 +156,7 @@ def test_cli_network_filter_flags(
 def test_cli_net_allow_implies_filter(prepared_cwd: Path, fake_bwrap) -> None:
     result = CliRunner().invoke(
         cli,
-        ["--no-feature", "ssh", "--net-allow", "1.1.1.1/32", "/bin/true"],
+        ["run", "--no-feature", "ssh", "--net-allow", "1.1.1.1/32", "/bin/true"],
     )
     assert result.exit_code == 0, result.output
     assert fake_bwrap["nets"][0].mode == "filter"
@@ -160,7 +164,9 @@ def test_cli_net_allow_implies_filter(prepared_cwd: Path, fake_bwrap) -> None:
 
 
 def test_cli_network_none_mode(prepared_cwd: Path, fake_bwrap) -> None:
-    result = CliRunner().invoke(cli, ["--no-feature", "ssh", "--network", "none", "/bin/true"])
+    result = CliRunner().invoke(
+        cli, ["run", "--no-feature", "ssh", "--network", "none", "/bin/true"]
+    )
     assert result.exit_code == 0, result.output
     assert fake_bwrap["nets"][0].mode == "none"
 
@@ -170,7 +176,7 @@ def test_cli_list_net_presets(tmp_config: Path) -> None:
         "[network.presets]\ncorp = [\"10.50.0.0/16\"]\n",
         encoding="utf-8",
     )
-    result = CliRunner().invoke(cli, ["--list-net-presets"])
+    result = CliRunner().invoke(cli, ["list-net-presets"])
     assert result.exit_code == 0
     assert "private" in result.output
     assert "metadata" in result.output
@@ -182,6 +188,7 @@ def test_cli_net_deny_preset(prepared_cwd: Path, fake_bwrap) -> None:
     result = CliRunner().invoke(
         cli,
         [
+            "run",
             "--no-feature",
             "ssh",
             "--network",
@@ -207,6 +214,7 @@ def test_cli_custom_net_deny_preset(
     result = CliRunner().invoke(
         cli,
         [
+            "run",
             "--no-feature",
             "ssh",
             "--network",

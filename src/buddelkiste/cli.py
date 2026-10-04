@@ -1,7 +1,22 @@
-"""Sandbox a command using bubblewrap.
+"""Bubblewrap sandbox CLI (`bk`)."""
 
-Pass the executable and its arguments on the command line. They are run inside
-a bubblewrap sandbox. Wrapper options are --debug, feature toggles, and network
+from __future__ import annotations
+
+import json
+import logging
+import os
+import pwd
+import sys
+import tomllib
+from collections.abc import Sequence
+from pathlib import Path
+
+import click
+
+RUN_HELP = """Run a command inside a bubblewrap sandbox.
+
+Pass the executable and its arguments after any wrapper options. They are run
+inside the sandbox. Wrapper options are --debug, feature toggles, and network
 controls; everything else is forwarded as the sandboxed command.
 
 With no command, a login shell is started inside the sandbox so the environment
@@ -14,7 +29,7 @@ Optional permission sets are grouped by topic (cursor, python, ssh, ...).
 Built-ins default to on and are registered via the buddelkiste.features entry
 point group (third-party packages can add more). Toggle with --feature /
 --no-feature, or in config. Define pure-TOML features under [feature.<name>].
-Use --list-features to print the catalog (includes module paths).
+Use `bk list-features` to print the catalog (includes module paths).
 
 Config may set features globally and per executable (matched by path or
 basename of the command being started). A list selects exactly those features;
@@ -34,7 +49,7 @@ keeps working under a default-deny policy. Rules may be IP/CIDR literals or
 hostnames (exact or *.suffix); hostnames use a DNS proxy that publishes
 resolved A/AAAA addresses into dynamic nft sets. Named deny presets (private,
 linklocal, metadata, plus custom names under [network.presets]) expand to
-IP/CIDR or hostname denials; see --list-net-presets.
+IP/CIDR or hostname denials; see `bk list-net-presets`.
 
 
 # Configuration
@@ -138,19 +153,6 @@ configuration file. When running non-interactively the script exits with an
 error instead.
 """
 
-from __future__ import annotations
-
-import json
-import logging
-import os
-import pwd
-import sys
-import tomllib
-from collections.abc import Sequence
-from pathlib import Path
-
-import click
-
 from buddelkiste.binds import ROBindConfig, RWBindConfig, bind_config, get_bind_args
 from buddelkiste.features import (
     FEATURES,
@@ -173,8 +175,14 @@ env = os.getenv
 CONFIG_PATH = Path("~/.config/buddelkiste/config.toml")
 
 
-@click.command(
-    help=__doc__,
+@click.group(help=__doc__)
+def cli() -> None:
+    """Bubblewrap sandbox CLI."""
+
+
+@cli.command(
+    "run",
+    help=RUN_HELP,
     context_settings={
         "ignore_unknown_options": True,
         "help_option_names": [],
@@ -191,19 +199,13 @@ CONFIG_PATH = Path("~/.config/buddelkiste/config.toml")
     "-f",
     "enable_features",
     multiple=True,
-    help="Enable a feature (repeatable). See --list-features.",
+    help="Enable a feature (repeatable). See `bk list-features`.",
 )
 @click.option(
     "--no-feature",
     "disable_features",
     multiple=True,
-    help="Disable a feature (repeatable). See --list-features.",
-)
-@click.option(
-    "--list-features",
-    is_flag=True,
-    default=False,
-    help="List available features and exit",
+    help="Disable a feature (repeatable). See `bk list-features`.",
 )
 @click.option(
     "--network",
@@ -233,43 +235,27 @@ CONFIG_PATH = Path("~/.config/buddelkiste/config.toml")
     "--net-deny-preset",
     multiple=True,
     help="Deny a named preset (built-in or from [network.presets]). "
-    "Implies --network filter. Repeatable.",
-)
-@click.option(
-    "--list-net-presets",
-    is_flag=True,
-    default=False,
-    help="List built-in and config network deny presets and exit",
+    "Implies --network filter. Repeatable. See `bk list-net-presets`.",
 )
 @click.argument(
     "args",
     nargs=-1,
     callback=lambda ctx, arg, value: list(value),
 )
-def cli(
+def run(
     debug: bool,
     enable_features: tuple[str, ...],
     disable_features: tuple[str, ...],
-    list_features: bool,
     network_mode: str | None,
     net_policy: str | None,
     net_allow: tuple[str, ...],
     net_deny: tuple[str, ...],
     net_deny_preset: tuple[str, ...],
-    list_net_presets: bool,
     args: list[str],
 ) -> None:
     logging.basicConfig(level="DEBUG" if debug else "WARNING")
 
     config = load_config()
-
-    if list_features or args == ["--list-features"]:
-        click.echo(format_features_help(config))
-        raise SystemExit(0)
-
-    if list_net_presets or args == ["--list-net-presets"]:
-        click.echo(format_deny_presets_help(load_deny_preset_registry(config)))
-        raise SystemExit(0)
     command = resolve_launch_command(args)
     executable = command_executable(command, args)
     enabled = resolve_features(
@@ -317,6 +303,18 @@ def cli(
         exit_code = run_bwrap(bwrap_args, net)
 
     sys.exit(exit_code)
+
+
+@cli.command("list-features")
+def list_features() -> None:
+    """List available features and their origins."""
+    click.echo(format_features_help(load_config()))
+
+
+@cli.command("list-net-presets")
+def list_net_presets() -> None:
+    """List built-in and config network deny presets."""
+    click.echo(format_deny_presets_help(load_deny_preset_registry(load_config())))
 
 
 def load_config():
@@ -489,8 +487,11 @@ __all__ = [
     "get_bind_args",
     "get_binds",
     "get_env_args",
+    "list_features",
+    "list_net_presets",
     "load_config",
     "resolve_features",
     "resolve_launch_command",
     "resolve_network",
+    "run",
 ]

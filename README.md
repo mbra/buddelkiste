@@ -6,37 +6,39 @@ Run a command inside a [bubblewrap](https://github.com/containers/bubblewrap) sa
 
 ```bash
 # Run a command in the sandbox
-bk /path/to/executable [args...]
+bk run /path/to/executable [args...]
 
 # Inspect the sandbox (login shell)
-bk
+bk run
+
+# Catalog helpers
+bk list-features
+bk list-net-presets
 
 # Topic features (all on by default)
-bk --list-features
-bk --no-feature gui --no-feature google cursor-agent
-bk --feature python --feature ssh python myscript.py
+bk run --no-feature gui --no-feature google cursor-agent
+bk run --feature python --feature ssh python myscript.py
 
 # Network modes
-bk --network host …                 # share host network (default)
-bk --network none …                 # no connectivity
-bk --network filter \
+bk run --network host …                 # share host network (default)
+bk run --network none …                 # no connectivity
+bk run --network filter \
   --net-policy deny \
   --net-allow 1.1.1.1/32 \
   --net-allow api.github.com \
   --net-allow '*.pypi.org' \
   --net-deny-preset metadata \
   --net-deny-preset private …
-bk --list-net-presets
 ```
 
-Wrapper options: `--debug`, `--feature` / `--no-feature`, `--list-features`,
-`--network`, `--net-policy`, `--net-allow`, `--net-deny`, `--net-deny-preset`,
-`--list-net-presets`. Everything else is the sandboxed command.
+`bk run` wrapper options: `--debug`, `--feature` / `--no-feature`,
+`--network`, `--net-policy`, `--net-allow`, `--net-deny`, `--net-deny-preset`.
+Everything else is the sandboxed command.
 
 ## Features
 
 Optional permission sets are grouped by topic. Built-ins default to **on**.
-Toggle with CLI flags or config; see `bk --list-features` for the live catalog
+Toggle with CLI flags or config; see `bk list-features` for the live catalog
 (including each feature's module path).
 
 | Feature | What it grants |
@@ -61,16 +63,16 @@ Toggle with CLI flags or config; see `bk --list-features` for the live catalog
 ### CLI
 
 ```bash
-bk --list-features
+bk list-features
 
 # Tighten a desktop-ish run
-bk --no-feature gui --no-feature dbus --no-feature xdg-open curl https://example.com
+bk run --no-feature gui --no-feature dbus --no-feature xdg-open curl https://example.com
 
 # Minimal toolchains for a script
-bk --no-feature cursor --no-feature google --feature python --feature git python app.py
+bk run --no-feature cursor --no-feature google --feature python --feature git python app.py
 
 # Allowlist-style: disable broadly in config, then enable what you need
-bk --feature ssh --feature git git fetch
+bk run --feature ssh --feature git git fetch
 ```
 
 Precedence (later wins for CLI flags): feature defaults → global config
@@ -167,12 +169,12 @@ Built-ins and third-party packages register features under the
 | Field | Type | Default | Meaning |
 |-------|------|---------|---------|
 | `name` | `str` | *(required)* | Feature id used in CLI/config (`--feature`, `features = [...]`). Overwritten by the entry-point name at load time. |
-| `description` | `str` | *(required)* | One-line summary shown by `--list-features`. |
+| `description` | `str` | *(required)* | One-line summary shown by `bk list-features`. |
 | `default` | `bool` | `True` | Whether the feature is enabled before config/CLI overrides. |
 | `env_vars` | `tuple[str, ...]` | `()` | Host env var names to forward into the sandbox when the feature is on. |
 | `binds` | `Callable[[], list]` | `lambda: []` | Zero-arg callable returning bind objects (`ROBindConfig`, `RWBindConfig`, `DevBindConfig`, overlay configs, `Tmpfs`, or raw bwrap arg tuples). Called each run. |
 | `setup` | `Callable[[], AbstractContextManager[Sequence[str]]] \| None` | `None` | Optional factory returning a context manager. Entered while the sandbox runs; its yielded sequence is appended as extra bwrap args (binds, `--setenv`, …). Use for sockets/agents that need lifecycle. |
-| `origin` | `str` | `""` | Shown in `--list-features`. Overwritten by the entry-point value at load time (e.g. `mypkg.features:RUST`). |
+| `origin` | `str` | `""` | Shown in `bk list-features`. Overwritten by the entry-point value at load time (e.g. `mypkg.features:RUST`). |
 
 ```python
 # mypkg/features.py
@@ -216,7 +218,7 @@ RUST = Feature(
 rust = "mypkg.features:RUST"
 ```
 
-After install, `bk --list-features` shows the entry and its origin. Pure-TOML
+After install, `bk list-features` shows the entry and its origin. Pure-TOML
 `[feature.<name>]` covers env/bind cases without a package; use Python entry
 points for custom bind logic or `setup` hooks. Config feature names must not
 collide with an existing entry point.

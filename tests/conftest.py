@@ -60,7 +60,7 @@ def run_bk(integ_workspace: dict[str, Path]):
         env["HOME"] = str(integ_workspace["home"])
         env["XDG_RUNTIME_DIR"] = str(integ_workspace["runtime"])
         return subprocess.run(
-            [sys.executable, "-m", "buddelkiste", *args],
+            [sys.executable, "-m", "buddelkiste", "run", *args],
             cwd=integ_workspace["work"],
             env=env,
             check=check,

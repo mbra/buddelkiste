@@ -31,8 +31,16 @@ def test_resolve_launch_command_help_exits(help_arg: str) -> None:
     assert excinfo.value.code == 0
 
 
-def test_cli_help_via_args() -> None:
+def test_cli_group_help() -> None:
     result = CliRunner().invoke(cli, ["--help"])
     assert result.exit_code == 0
-    assert "Sandbox a command using bubblewrap" in result.output
+    assert "run" in result.output
+    assert "list-features" in result.output
+    assert "list-net-presets" in result.output
+
+
+def test_cli_run_help_via_args() -> None:
+    result = CliRunner().invoke(cli, ["run", "--help"])
+    assert result.exit_code == 0
+    assert "Run a command inside a bubblewrap sandbox" in result.output
     assert "--debug" in result.output
