@@ -1,6 +1,7 @@
 """Optional sandbox features grouped by topic (cursor, python, ssh, ...).
 
-Built-in features live in ``FEATURES``. Config may define additional pure-TOML
+Features are discovered via the ``buddelkiste.features`` entry-point group. Packages
+can register additional features there. Config may also define pure-TOML
 features under ``[feature.<name>]`` with env allowlists and bind mounts.
 Bind paths may interpolate ``$VAR`` / ``${VAR}`` from the process environment.
 """
@@ -15,7 +16,9 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from functools import lru_cache
+from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Self
 
@@ -24,6 +27,8 @@ import click
 from buddelkiste.binds import DevBindConfig, ROBindConfig, RWBindConfig, Tmpfs
 
 env = os.getenv
+
+ENTRY_POINT_GROUP = "buddelkiste.features"
 
 _ENV_VAR_RE = re.compile(
     r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)"
@@ -41,6 +46,8 @@ class Feature:
     env_vars: tuple[str, ...] = ()
     binds: Callable[[], list] = field(default_factory=lambda: lambda: [])
     setup: Callable[[], AbstractContextManager[Sequence[str]]] | None = None
+    # Module path or config location shown in --list-features.
+    origin: str = ""
 
 
 def _runtime() -> Path:
@@ -277,82 +284,166 @@ def ssh_setup() -> Iterator[Sequence[str]]:
         ]
 
 
-FEATURES: dict[str, Feature] = {
-    feature.name: feature
-    for feature in (
-        Feature(
-            name="cursor",
-            description="Cursor IDE/CLI install paths and state directories",
-            binds=cursor_binds,
-        ),
-        Feature(
-            name="python",
-            description="pip config, virtualenvs, and Python env vars",
-            env_vars=("PIP_REQUIRE_VIRTUALENV", "VIRTUAL_ENV", "WORKON_HOME"),
-            binds=python_binds,
-        ),
-        Feature(
-            name="node",
-            description="npm, nvm, and bun",
-            env_vars=("BUN_INSTALL",),
-            binds=node_binds,
-        ),
-        Feature(
-            name="asdf",
-            description="asdf version manager",
-            env_vars=("ASDF_DIR",),
-            binds=asdf_binds,
-        ),
-        Feature(
-            name="docker",
-            description="Docker CLI config and user daemon socket",
-            env_vars=("DOCKER_HOST",),
-            binds=docker_binds,
-        ),
-        Feature(
-            name="git",
-            description="Git configuration files",
-            binds=git_binds,
-        ),
-        Feature(
-            name="ssh",
-            description="SSH config plus a dedicated agent with sandbox_* keys",
-            binds=ssh_binds,
-            setup=ssh_setup,
-        ),
-        Feature(
-            name="java",
-            description="OpenJDK system configuration",
-            binds=java_binds,
-        ),
-        Feature(
-            name="nvim",
-            description="Neovim config under ~/nvim",
-            binds=nvim_binds,
-        ),
-        Feature(
-            name="google",
-            description="Google tools under /opt/google",
-            binds=google_binds,
-        ),
-        Feature(
-            name="gui",
-            description="Graphical apps: display, GPU, audio, fonts",
-            env_vars=(
-                "DISPLAY",
-                "MOZ_ENABLE_WAYLAND",
-                "WAYLAND_DISPLAY",
-                "XAUTHORITY",
-                "XCURSOR_SIZE",
-                "XDG_CURRENT_DESKTOP",
-                "XDG_SESSION_TYPE",
-            ),
-            binds=gui_binds,
-        ),
-    )
-}
+CURSOR = Feature(
+    name="cursor",
+    description="Cursor IDE/CLI install paths and state directories",
+    binds=cursor_binds,
+    origin="buddelkiste.features:CURSOR",
+)
+PYTHON = Feature(
+    name="python",
+    description="pip config, virtualenvs, and Python env vars",
+    env_vars=("PIP_REQUIRE_VIRTUALENV", "VIRTUAL_ENV", "WORKON_HOME"),
+    binds=python_binds,
+    origin="buddelkiste.features:PYTHON",
+)
+NODE = Feature(
+    name="node",
+    description="npm, nvm, and bun",
+    env_vars=("BUN_INSTALL",),
+    binds=node_binds,
+    origin="buddelkiste.features:NODE",
+)
+ASDF = Feature(
+    name="asdf",
+    description="asdf version manager",
+    env_vars=("ASDF_DIR",),
+    binds=asdf_binds,
+    origin="buddelkiste.features:ASDF",
+)
+DOCKER = Feature(
+    name="docker",
+    description="Docker CLI config and user daemon socket",
+    env_vars=("DOCKER_HOST",),
+    binds=docker_binds,
+    origin="buddelkiste.features:DOCKER",
+)
+GIT = Feature(
+    name="git",
+    description="Git configuration files",
+    binds=git_binds,
+    origin="buddelkiste.features:GIT",
+)
+SSH = Feature(
+    name="ssh",
+    description="SSH config plus a dedicated agent with sandbox_* keys",
+    binds=ssh_binds,
+    setup=ssh_setup,
+    origin="buddelkiste.features:SSH",
+)
+JAVA = Feature(
+    name="java",
+    description="OpenJDK system configuration",
+    binds=java_binds,
+    origin="buddelkiste.features:JAVA",
+)
+NVIM = Feature(
+    name="nvim",
+    description="Neovim config under ~/nvim",
+    binds=nvim_binds,
+    origin="buddelkiste.features:NVIM",
+)
+GOOGLE = Feature(
+    name="google",
+    description="Google tools under /opt/google",
+    binds=google_binds,
+    origin="buddelkiste.features:GOOGLE",
+)
+GUI = Feature(
+    name="gui",
+    description="Graphical apps: display, GPU, audio, fonts",
+    env_vars=(
+        "DISPLAY",
+        "MOZ_ENABLE_WAYLAND",
+        "WAYLAND_DISPLAY",
+        "XAUTHORITY",
+        "XCURSOR_SIZE",
+        "XDG_CURRENT_DESKTOP",
+        "XDG_SESSION_TYPE",
+    ),
+    binds=gui_binds,
+    origin="buddelkiste.features:GUI",
+)
 
-FEATURE_NAMES = tuple(FEATURES)
+
+def _load_entry_point_object(ep) -> Feature:
+    try:
+        obj = ep.load()
+    except Exception as exc:
+        raise click.ClickException(
+            f"Failed to load feature entry point {ep.name!r} ({ep.value}): {exc}"
+        ) from exc
+
+    if isinstance(obj, Feature):
+        feature = obj
+    elif callable(obj):
+        feature = obj()
+        if not isinstance(feature, Feature):
+            raise click.ClickException(
+                f"Feature entry point {ep.name!r} ({ep.value}) did not return a Feature"
+            )
+    else:
+        raise click.ClickException(
+            f"Feature entry point {ep.name!r} ({ep.value}) must be a Feature "
+            "or a zero-argument callable returning one"
+        )
+    return replace(feature, name=ep.name, origin=ep.value)
+
+
+def _builtin_feature_fallback() -> dict[str, Feature]:
+    """Built-ins used when entry points are not installed yet (source tree)."""
+    return {
+        f.name: f
+        for f in (
+            CURSOR,
+            PYTHON,
+            NODE,
+            ASDF,
+            DOCKER,
+            GIT,
+            SSH,
+            JAVA,
+            NVIM,
+            GOOGLE,
+            GUI,
+        )
+    }
+
+
+@lru_cache(maxsize=1)
+def load_entry_point_features() -> dict[str, Feature]:
+    """Load features registered under the ``buddelkiste.features`` entry-point group."""
+    selected = entry_points().select(group=ENTRY_POINT_GROUP)
+    registry: dict[str, Feature] = {}
+    for ep in selected:
+        if ep.name in registry:
+            raise click.ClickException(
+                f"Duplicate feature entry point {ep.name!r}: "
+                f"{registry[ep.name].origin} and {ep.value}"
+            )
+        registry[ep.name] = _load_entry_point_object(ep)
+    if not registry:
+        return _builtin_feature_fallback()
+    return registry
+
+
+def clear_feature_caches() -> None:
+    """Clear cached entry-point features (for tests)."""
+    load_entry_point_features.cache_clear()
+    _refresh_features_alias()
+
+
+def _refresh_features_alias() -> None:
+    FEATURES.clear()
+    FEATURES.update(load_entry_point_features())
+    global FEATURE_NAMES
+    FEATURE_NAMES = tuple(FEATURES)
+
+
+# Import compatibility: dict/tuple updated from entry points (or builtin fallback).
+FEATURES: dict[str, Feature] = {}
+FEATURE_NAMES: tuple[str, ...] = ()
+_refresh_features_alias()
 
 
 def interpolate_env(text: str, environ: Mapping[str, str] | None = None) -> str:
@@ -443,12 +534,13 @@ def parse_toml_feature(name: str, data: dict) -> Feature:
         default=default,
         env_vars=env_vars,
         binds=_toml_binds_factory(binds_spec, feature_name=name),
+        origin=f"config:[feature.{name}]",
     )
 
 
 def load_feature_registry(config: dict) -> dict[str, Feature]:
-    """Built-in features plus optional ``[feature.<name>]`` definitions."""
-    registry = dict(FEATURES)
+    """Entry-point features plus optional ``[feature.<name>]`` definitions."""
+    registry = dict(load_entry_point_features())
     custom = config.get("feature")
     if custom is None:
         return registry
@@ -459,20 +551,22 @@ def load_feature_registry(config: dict) -> dict[str, Feature]:
 
     for name, data in custom.items():
         key = str(name)
-        if key in FEATURES:
+        if key in registry:
             raise click.ClickException(
-                f"feature.{key} conflicts with built-in feature {key!r}"
+                f"feature.{key} conflicts with existing feature "
+                f"{key!r} ({registry[key].origin})"
             )
         registry[key] = parse_toml_feature(key, data)
     return registry
 
 
 def feature_names(registry: dict[str, Feature] | None = None) -> list[str]:
-    """Stable feature name order: built-ins first, then custom definitions."""
+    """Stable feature name order: entry-point features first, then config."""
     if registry is None:
-        return list(FEATURE_NAMES)
-    custom = [name for name in registry if name not in FEATURES]
-    return list(FEATURE_NAMES) + custom
+        return list(load_entry_point_features())
+    ep_names = list(load_entry_point_features())
+    config_names = [name for name in registry if name not in load_entry_point_features()]
+    return ep_names + config_names
 
 
 def _unknown_feature_message(
@@ -652,9 +746,9 @@ def format_features_help(config: dict | None = None) -> str:
     width = max(len(name) for name in names)
     for name in names:
         feature = registry[name]
-        suffix = "" if name in FEATURES else " (custom)"
         default = "on" if feature.default else "off"
+        origin = feature.origin or "unknown"
         lines.append(
-            f"  {name:<{width}}  {feature.description} [default: {default}]{suffix}"
+            f"  {name:<{width}}  {feature.description} [default: {default}] ({origin})"
         )
     return "\n".join(lines)

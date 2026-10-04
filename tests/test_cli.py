@@ -78,13 +78,13 @@ def test_cli_list_features(tmp_config: Path) -> None:
         'env = ["CARGO_HOME"]\n',
         encoding="utf-8",
     )
-    # CONFIG_PATH is a Path("~/.config/...") object; point load_config at tmp.
     result = CliRunner().invoke(cli, ["--list-features"])
     assert result.exit_code == 0
     assert "cursor" in result.output
     assert "python" in result.output
+    assert "buddelkiste.features:CURSOR" in result.output
     assert "rust" in result.output
-    assert "custom" in result.output
+    assert "config:[feature.rust]" in result.output
 
 
 def test_cli_disables_feature_via_flag(

@@ -11,9 +11,10 @@ can be inspected.
 # Features
 
 Optional permission sets are grouped by topic (cursor, python, ssh, ...).
-Built-ins default to on. Toggle them with --feature / --no-feature, or in
-~/.config/buddelkiste/config.toml. Define extra features under [feature.<name>].
-Use --list-features to print the catalog.
+Built-ins default to on and are registered via the buddelkiste.features entry
+point group (third-party packages can add more). Toggle with --feature /
+--no-feature, or in config. Define pure-TOML features under [feature.<name>].
+Use --list-features to print the catalog (includes module paths).
 
 Config may set features globally and per executable (matched by path or
 basename of the command being started). A list selects exactly those features;
@@ -46,7 +47,8 @@ or a table of feature name = true/false overrides.
 
 feature: Table of custom feature definitions under [feature.<name>]. Each may
 set description, default, env (allowlisted variable names), and binds (list of
-source/target/read_only tables). Bind paths may use $VAR or ${VAR}.
+source/target/read_only tables). Bind paths may use $VAR or ${VAR}. Packages
+may also register features via the buddelkiste.features entry-point group.
 
 executables: Table keyed by executable path or basename. Each entry may contain
 a features list or table, and/or a network table, applied when that executable

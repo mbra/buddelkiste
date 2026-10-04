@@ -8,7 +8,9 @@ import pytest
 from buddelkiste.features import (
     FEATURE_NAMES,
     FEATURES,
+    Feature,
     base_binds,
+    clear_feature_caches,
     cursor_binds,
     enabled_feature_names,
     expand_bind_path,
@@ -16,6 +18,7 @@ from buddelkiste.features import (
     feature_env_var_names,
     format_features_help,
     interpolate_env,
+    load_entry_point_features,
     load_feature_registry,
     python_binds,
     resolve_features,
@@ -163,7 +166,7 @@ def test_toml_custom_feature_registry_and_resolve(
     registry = load_feature_registry(config)
     assert "rust" in registry
     assert registry["rust"].env_vars == ("CARGO_HOME", "RUSTUP_HOME")
-    assert " (custom)" in format_features_help(config)
+    assert "config:[feature.rust]" in format_features_help(config)
 
     enabled = resolve_features(config)
     assert enabled["rust"] is True
@@ -180,7 +183,7 @@ def test_toml_custom_feature_registry_and_resolve(
 
 
 def test_toml_feature_rejects_builtin_name() -> None:
-    with pytest.raises(click.ClickException, match="conflicts with built-in"):
+    with pytest.raises(click.ClickException, match="conflicts with existing"):
         load_feature_registry({"feature": {"python": {"env": ["FOO"]}}})
 
 
@@ -258,3 +261,47 @@ def test_format_features_help_lists_topics() -> None:
     assert "python" in text
     assert "gui" in text
     assert "default: on" in text
+    assert "buddelkiste.features:CURSOR" in text
+    assert "buddelkiste.features:PYTHON" in text
+
+
+def test_entry_point_features_include_builtins() -> None:
+    loaded = load_entry_point_features()
+    assert "cursor" in loaded
+    assert "ssh" in loaded
+    assert loaded["cursor"].origin.endswith(":CURSOR")
+
+
+def test_third_party_entry_point_feature(monkeypatch: pytest.MonkeyPatch) -> None:
+    from importlib.metadata import entry_points as real_entry_points
+
+    class FakeEP:
+        name = "labs"
+        value = "acme.plugins:LABS"
+
+        def load(self):
+            return Feature(
+                name="labs",
+                description="Acme labs",
+                default=False,
+                env_vars=("LAB_TOKEN",),
+            )
+
+    class FakeEPs:
+        def select(self, *, group):
+            assert group == "buddelkiste.features"
+            real = list(real_entry_points().select(group=group))
+            return [*real, FakeEP()]
+
+    monkeypatch.setattr("buddelkiste.features.entry_points", lambda: FakeEPs())
+    clear_feature_caches()
+    try:
+        registry = load_entry_point_features()
+        assert "labs" in registry
+        assert registry["labs"].origin == "acme.plugins:LABS"
+        assert "acme.plugins:LABS" in format_features_help()
+        enabled = resolve_features({}, enable=["labs"])
+        assert enabled["labs"] is True
+    finally:
+        monkeypatch.setattr("buddelkiste.features.entry_points", real_entry_points)
+        clear_feature_caches()
