@@ -144,3 +144,27 @@ def test_cli_network_none_mode(prepared_cwd: Path, fake_bwrap) -> None:
     result = CliRunner().invoke(cli, ["--no-feature", "ssh", "--network", "none", "/bin/true"])
     assert result.exit_code == 0, result.output
     assert fake_bwrap["nets"][0].mode == "none"
+
+
+def test_cli_list_net_presets() -> None:
+    result = CliRunner().invoke(cli, ["--list-net-presets"])
+    assert result.exit_code == 0
+    assert "private" in result.output
+    assert "metadata" in result.output
+
+
+def test_cli_net_deny_preset(prepared_cwd: Path, fake_bwrap) -> None:
+    result = CliRunner().invoke(
+        cli,
+        [
+            "--no-feature",
+            "ssh",
+            "--network",
+            "filter",
+            "--net-deny-preset",
+            "metadata",
+            "/bin/true",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "169.254.169.254/32" in fake_bwrap["nets"][0].deny

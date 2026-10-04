@@ -7,9 +7,12 @@ import click
 import pytest
 
 from buddelkiste.network import (
+    DENY_PRESETS,
     NetworkConfig,
     build_nft_ruleset,
     canonicalize_cidr,
+    expand_deny_presets,
+    format_deny_presets_help,
     resolve_network,
     resolv_conf_nameservers,
     run_bwrap,
@@ -34,6 +37,30 @@ def test_resolve_network_defaults() -> None:
     assert net.policy == "deny"
     assert net.allow == []
     assert net.deny == []
+
+
+def test_deny_presets_expand() -> None:
+    assert "10.0.0.0/8" in expand_deny_presets(["private"])
+    assert "169.254.169.254/32" in expand_deny_presets(["metadata"])
+    with pytest.raises(click.ClickException, match="Unknown network deny preset"):
+        expand_deny_presets(["nope"])
+
+
+def test_resolve_network_deny_presets() -> None:
+    net = resolve_network(
+        {"network": {"mode": "filter", "deny_presets": ["metadata", "linklocal"]}},
+        deny_presets=["private"],
+    )
+    assert "169.254.169.254/32" in net.deny
+    assert "169.254.0.0/16" in net.deny
+    assert "10.0.0.0/8" in net.deny
+    assert set(net.deny_presets) == {"metadata", "linklocal", "private"}
+
+
+def test_format_deny_presets_help() -> None:
+    text = format_deny_presets_help()
+    for name in DENY_PRESETS:
+        assert name in text
 
 
 def test_resolve_network_global_and_cli() -> None:

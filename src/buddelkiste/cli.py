@@ -27,7 +27,8 @@ allow/deny). Filter mode needs no root and no reserved host subnets.
 
 In filter mode, nameserver IPs from /etc/resolv.conf are auto-allowed so DNS
 keeps working under a default-deny policy. Rule addresses must be IP/CIDR
-literals.
+literals. Named deny presets (private, linklocal, metadata) expand to common
+block ranges; see --list-net-presets.
 
 
 # Configuration
@@ -64,7 +65,8 @@ envvars: List of additional environment variables for the sandbox. The mandatory
   mode = "filter"
   policy = "deny"
   allow = ["1.1.1.1/32", "8.8.8.8/32"]
-  deny = ["169.254.169.254/32"]
+  deny = ["203.0.113.0/24"]
+  deny_presets = ["metadata", "linklocal"]
 
   [executables.cursor-agent]
   features = ["cursor", "git", "ssh", "gui"]
@@ -117,7 +119,7 @@ from buddelkiste.features import (
     format_features_help,
     resolve_features,
 )
-from buddelkiste.network import resolve_network, run_bwrap
+from buddelkiste.network import format_deny_presets_help, resolve_network, run_bwrap
 
 env = os.getenv
 
@@ -179,6 +181,17 @@ CONFIG_PATH = Path("~/.config/buddelkiste/config.toml")
     multiple=True,
     help="Deny an IP/CIDR in filter mode (repeatable).",
 )
+@click.option(
+    "--net-deny-preset",
+    multiple=True,
+    help="Deny a named preset (private, linklocal, metadata). Repeatable.",
+)
+@click.option(
+    "--list-net-presets",
+    is_flag=True,
+    default=False,
+    help="List network deny presets and exit",
+)
 @click.argument(
     "args",
     nargs=-1,
@@ -193,12 +206,18 @@ def cli(
     net_policy: str | None,
     net_allow: tuple[str, ...],
     net_deny: tuple[str, ...],
+    net_deny_preset: tuple[str, ...],
+    list_net_presets: bool,
     args: list[str],
 ) -> None:
     logging.basicConfig(level="DEBUG" if debug else "WARNING")
 
     if list_features or args == ["--list-features"]:
         click.echo(format_features_help())
+        raise SystemExit(0)
+
+    if list_net_presets or args == ["--list-net-presets"]:
+        click.echo(format_deny_presets_help())
         raise SystemExit(0)
 
     config = load_config()
@@ -217,6 +236,7 @@ def cli(
         policy=net_policy,
         allow=net_allow,
         deny=net_deny,
+        deny_presets=net_deny_preset,
     )
     binds = get_binds(config, enabled)
     env_args = get_env_args(config, enabled)

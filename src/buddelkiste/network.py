@@ -34,6 +34,24 @@ log = logging.getLogger(__name__)
 NETWORK_MODES = ("host", "none", "filter")
 NETWORK_POLICIES = ("allow", "deny")
 
+# Named deny helpers expanded into concrete CIDRs at resolve time.
+DENY_PRESETS: dict[str, tuple[str, ...]] = {
+    "private": (
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "fc00::/7",
+    ),
+    "linklocal": (
+        "169.254.0.0/16",
+        "fe80::/10",
+    ),
+    "metadata": (
+        "169.254.169.254/32",
+        "fd00:ec2::254/128",
+    ),
+}
+
 
 @dataclass
 class NetworkConfig:
@@ -41,14 +59,52 @@ class NetworkConfig:
     policy: str = "deny"
     allow: list[str] = field(default_factory=list)
     deny: list[str] = field(default_factory=list)
+    deny_presets: list[str] = field(default_factory=list)
 
     def normalized(self) -> NetworkConfig:
+        presets = validate_deny_presets(self.deny_presets)
+        deny = list(
+            dict.fromkeys(
+                [
+                    *[canonicalize_cidr(c) for c in self.deny],
+                    *expand_deny_presets(presets),
+                ]
+            )
+        )
         return NetworkConfig(
             mode=self.mode,
             policy=self.policy,
             allow=[canonicalize_cidr(c) for c in self.allow],
-            deny=[canonicalize_cidr(c) for c in self.deny],
+            deny=deny,
+            deny_presets=presets,
         )
+
+
+def validate_deny_presets(presets: Sequence[str]) -> list[str]:
+    result: list[str] = []
+    for name in presets:
+        if name not in DENY_PRESETS:
+            known = ", ".join(DENY_PRESETS)
+            raise click.ClickException(
+                f"Unknown network deny preset: {name!r} (expected {known})"
+            )
+        if name not in result:
+            result.append(name)
+    return result
+
+
+def expand_deny_presets(presets: Sequence[str]) -> list[str]:
+    cidrs: list[str] = []
+    for name in validate_deny_presets(presets):
+        cidrs.extend(DENY_PRESETS[name])
+    return cidrs
+
+
+def format_deny_presets_help() -> str:
+    lines = ["Available network deny presets:", ""]
+    for name, cidrs in DENY_PRESETS.items():
+        lines.append(f"  {name:10} {', '.join(cidrs)}")
+    return "\n".join(lines)
 
 
 def canonicalize_cidr(value: str) -> str:
@@ -81,14 +137,18 @@ def parse_network_table(data: dict, *, where: str) -> NetworkConfig:
 
     allow = data.get("allow", [])
     deny = data.get("deny", [])
+    deny_presets = data.get("deny_presets", [])
     if not isinstance(allow, list) or not isinstance(deny, list):
         raise click.ClickException(f"network.allow/deny {where} must be lists of IP/CIDR strings")
+    if not isinstance(deny_presets, list):
+        raise click.ClickException(f"network.deny_presets {where} must be a list of preset names")
 
     cfg = NetworkConfig(
         mode=mode,
         policy=policy,
         allow=[str(x) for x in allow],
         deny=[str(x) for x in deny],
+        deny_presets=[str(x) for x in deny_presets],
     )
     return cfg.normalized()
 
@@ -101,12 +161,13 @@ def resolve_network(
     policy: str | None = None,
     allow: Sequence[str] = (),
     deny: Sequence[str] = (),
+    deny_presets: Sequence[str] = (),
 ) -> NetworkConfig:
     """Resolve network settings.
 
     Precedence: defaults → global [network] → per-executable network → CLI flags.
-    CLI ``--net-allow`` / ``--net-deny`` append to the lists; ``--network`` /
-    ``--net-policy`` override mode/policy when given.
+    CLI ``--net-allow`` / ``--net-deny`` / ``--net-deny-preset`` append to the
+    lists; ``--network`` / ``--net-policy`` override mode/policy when given.
     """
     net = NetworkConfig()
     if "network" in config:
@@ -138,8 +199,10 @@ def resolve_network(
         net.allow.extend(canonicalize_cidr(c) for c in allow)
     if deny:
         net.deny.extend(canonicalize_cidr(c) for c in deny)
+    if deny_presets:
+        net.deny_presets.extend(deny_presets)
 
-    return net
+    return net.normalized()
 
 
 def resolv_conf_nameservers(path: Path | None = None) -> list[str]:

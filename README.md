@@ -22,12 +22,14 @@ bk --network none …                 # no connectivity
 bk --network filter \
   --net-policy deny \
   --net-allow 1.1.1.1/32 \
-  --net-deny 169.254.169.254/32 …
+  --net-deny-preset metadata \
+  --net-deny-preset private …
+bk --list-net-presets
 ```
 
 Wrapper options: `--debug`, `--feature` / `--no-feature`, `--list-features`,
-`--network`, `--net-policy`, `--net-allow`, `--net-deny`.
-Everything else is the sandboxed command.
+`--network`, `--net-policy`, `--net-allow`, `--net-deny`, `--net-deny-preset`,
+`--list-net-presets`. Everything else is the sandboxed command.
 
 Configuration (`~/.config/buddelkiste/config.toml`) can set a global feature list/table,
 per-executable overrides under `[executables.<name>]`, and `[network]` /
