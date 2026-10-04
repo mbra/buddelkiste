@@ -1,13 +1,19 @@
-"""Optional sandbox features grouped by topic (cursor, python, ssh, ...)."""
+"""Optional sandbox features grouped by topic (cursor, python, ssh, ...).
+
+Built-in features live in ``FEATURES``. Config may define additional pure-TOML
+features under ``[feature.<name>]`` with env allowlists and bind mounts.
+Bind paths may interpolate ``$VAR`` / ``${VAR}`` from the process environment.
+"""
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +24,11 @@ import click
 from buddelkiste.binds import DevBindConfig, ROBindConfig, RWBindConfig, Tmpfs
 
 env = os.getenv
+
+_ENV_VAR_RE = re.compile(
+    r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)"
+)
+_FEATURE_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
 
 @dataclass(frozen=True)
@@ -344,31 +355,169 @@ FEATURES: dict[str, Feature] = {
 FEATURE_NAMES = tuple(FEATURES)
 
 
-def _unknown_feature_message(name: str, where: str = "") -> str:
+def interpolate_env(text: str, environ: Mapping[str, str] | None = None) -> str:
+    """Expand ``$VAR`` / ``${VAR}`` using ``environ`` (default: ``os.environ``)."""
+    envmap = os.environ if environ is None else environ
+
+    def repl(match: re.Match[str]) -> str:
+        name = match.group(1) or match.group(2)
+        if name not in envmap:
+            raise click.ClickException(
+                f"environment variable {name!r} is not set (in {text!r})"
+            )
+        return envmap[name]
+
+    return _ENV_VAR_RE.sub(repl, text)
+
+
+def expand_bind_path(text: str, environ: Mapping[str, str] | None = None) -> str:
+    """Interpolate env vars and expand a leading ``~`` in a bind path."""
+    return str(Path(interpolate_env(text, environ)).expanduser())
+
+
+def _toml_binds_factory(
+    bind_specs: Sequence[dict],
+    *,
+    feature_name: str,
+) -> Callable[[], list]:
+    def binds() -> list:
+        result: list = []
+        for index, spec in enumerate(bind_specs):
+            if "source" not in spec:
+                raise click.ClickException(
+                    f"feature.{feature_name}.binds[{index}] missing required key 'source'"
+                )
+            source = expand_bind_path(str(spec["source"]))
+            target = (
+                expand_bind_path(str(spec["target"])) if "target" in spec else None
+            )
+            read_only = bool(spec.get("read_only", True))
+            cls = ROBindConfig if read_only else RWBindConfig
+            if target is None:
+                result.append(cls(source))
+            else:
+                result.append(cls(source, target))
+        return result
+
+    return binds
+
+
+def parse_toml_feature(name: str, data: dict) -> Feature:
+    """Parse a ``[feature.<name>]`` table into a :class:`Feature`."""
+    if not _FEATURE_NAME_RE.match(name):
+        raise click.ClickException(
+            f"Invalid feature name {name!r}: use letters, digits, '_' or '-'"
+        )
+    if not isinstance(data, dict):
+        raise click.ClickException(f"feature.{name} must be a table")
+
+    description = str(data.get("description", f"Custom feature {name!r}"))
+    default = bool(data.get("default", True))
+
+    env_spec = data.get("env", data.get("env_vars", []))
+    if not isinstance(env_spec, list):
+        raise click.ClickException(
+            f"feature.{name}.env must be a list of environment variable names"
+        )
+    env_vars = tuple(str(item) for item in env_spec)
+
+    binds_spec = data.get("binds", [])
+    if not isinstance(binds_spec, list):
+        raise click.ClickException(
+            f"feature.{name}.binds must be a list of bind tables"
+        )
+    for index, item in enumerate(binds_spec):
+        if not isinstance(item, dict):
+            raise click.ClickException(
+                f"feature.{name}.binds[{index}] must be a table with 'source'"
+            )
+
+    unknown = set(data) - {"description", "default", "env", "env_vars", "binds"}
+    if unknown:
+        keys = ", ".join(sorted(unknown))
+        raise click.ClickException(f"feature.{name} has unknown keys: {keys}")
+
+    return Feature(
+        name=name,
+        description=description,
+        default=default,
+        env_vars=env_vars,
+        binds=_toml_binds_factory(binds_spec, feature_name=name),
+    )
+
+
+def load_feature_registry(config: dict) -> dict[str, Feature]:
+    """Built-in features plus optional ``[feature.<name>]`` definitions."""
+    registry = dict(FEATURES)
+    custom = config.get("feature")
+    if custom is None:
+        return registry
+    if not isinstance(custom, dict):
+        raise click.ClickException(
+            "feature must be a table of [feature.<name>] definitions"
+        )
+
+    for name, data in custom.items():
+        key = str(name)
+        if key in FEATURES:
+            raise click.ClickException(
+                f"feature.{key} conflicts with built-in feature {key!r}"
+            )
+        registry[key] = parse_toml_feature(key, data)
+    return registry
+
+
+def feature_names(registry: dict[str, Feature] | None = None) -> list[str]:
+    """Stable feature name order: built-ins first, then custom definitions."""
+    if registry is None:
+        return list(FEATURE_NAMES)
+    custom = [name for name in registry if name not in FEATURES]
+    return list(FEATURE_NAMES) + custom
+
+
+def _unknown_feature_message(
+    name: str,
+    where: str = "",
+    *,
+    registry: dict[str, Feature] | None = None,
+) -> str:
+    known = ", ".join(feature_names(registry))
     if where:
-        return f"Unknown feature {where}: {name}"
-    return f"Unknown feature: {name}"
+        return f"Unknown feature {where}: {name} (expected {known})"
+    return f"Unknown feature: {name} (expected {known})"
 
 
-def apply_feature_spec(enabled: dict[str, bool], spec, *, where: str) -> None:
+def apply_feature_spec(
+    enabled: dict[str, bool],
+    spec,
+    *,
+    where: str,
+    registry: dict[str, Feature],
+) -> None:
     """Apply a config feature spec in place.
 
     A list sets the enabled set exactly (allowlist). A table applies boolean
     overrides on the current set.
     """
     if isinstance(spec, list):
-        unknown = [name for name in spec if name not in FEATURES]
+        unknown = [name for name in spec if name not in registry]
         if unknown:
-            raise click.ClickException(_unknown_feature_message(", ".join(unknown), where))
+            raise click.ClickException(
+                _unknown_feature_message(
+                    ", ".join(unknown), where, registry=registry
+                )
+            )
         selected = set(spec)
-        for name in FEATURES:
+        for name in registry:
             enabled[name] = name in selected
         return
 
     if isinstance(spec, dict):
         for name, value in spec.items():
-            if name not in FEATURES:
-                raise click.ClickException(_unknown_feature_message(name, where))
+            if name not in registry:
+                raise click.ClickException(
+                    _unknown_feature_message(name, where, registry=registry)
+                )
             enabled[name] = bool(value)
         return
 
@@ -411,16 +560,19 @@ def resolve_features(
     """Resolve which features are enabled.
 
     Precedence (later wins for CLI flags):
-    1. feature defaults
+    1. feature defaults (built-in + ``[feature.<name>]``)
     2. global config ``features`` (list allowlist or table overrides)
     3. per-executable config ``executables.<name>.features`` when an executable
        is provided
     4. CLI ``--feature`` / ``--no-feature``
     """
-    enabled = {name: feature.default for name, feature in FEATURES.items()}
+    registry = load_feature_registry(config)
+    enabled = {name: feature.default for name, feature in registry.items()}
 
     if "features" in config:
-        apply_feature_spec(enabled, config["features"], where="in config")
+        apply_feature_spec(
+            enabled, config["features"], where="in config", registry=registry
+        )
 
     exec_cfg = lookup_executable_config(config, executable)
     if exec_cfg is not None and "features" in exec_cfg:
@@ -428,55 +580,81 @@ def resolve_features(
             enabled,
             exec_cfg["features"],
             where=f"for executable {executable!r}",
+            registry=registry,
         )
 
     for name in enable:
-        if name not in FEATURES:
-            raise click.ClickException(_unknown_feature_message(name))
+        if name not in registry:
+            raise click.ClickException(
+                _unknown_feature_message(name, registry=registry)
+            )
         enabled[name] = True
 
     for name in disable:
-        if name not in FEATURES:
-            raise click.ClickException(_unknown_feature_message(name))
+        if name not in registry:
+            raise click.ClickException(
+                _unknown_feature_message(name, registry=registry)
+            )
         enabled[name] = False
 
     return enabled
 
 
-def enabled_feature_names(enabled: dict[str, bool]) -> list[str]:
-    return [name for name in FEATURE_NAMES if enabled.get(name)]
+def enabled_feature_names(
+    enabled: dict[str, bool],
+    registry: dict[str, Feature] | None = None,
+) -> list[str]:
+    return [name for name in feature_names(registry) if enabled.get(name)]
 
 
-def feature_binds(enabled: dict[str, bool]) -> list:
+def feature_binds(
+    enabled: dict[str, bool],
+    config: dict | None = None,
+) -> list:
+    registry = load_feature_registry(config or {})
     binds = base_binds()
-    for name in enabled_feature_names(enabled):
-        binds.extend(FEATURES[name].binds())
+    for name in enabled_feature_names(enabled, registry):
+        binds.extend(registry[name].binds())
     return binds
 
 
-def feature_env_var_names(enabled: dict[str, bool]) -> list[str]:
+def feature_env_var_names(
+    enabled: dict[str, bool],
+    config: dict | None = None,
+) -> list[str]:
+    registry = load_feature_registry(config or {})
     names = list(BASE_ENV_VARS)
-    for name in enabled_feature_names(enabled):
-        names.extend(FEATURES[name].env_vars)
+    for name in enabled_feature_names(enabled, registry):
+        names.extend(registry[name].env_vars)
     return names
 
 
 @contextmanager
-def feature_setup(enabled: dict[str, bool]) -> Iterator[list[str]]:
+def feature_setup(
+    enabled: dict[str, bool],
+    config: dict | None = None,
+) -> Iterator[list[str]]:
     """Run setup hooks for enabled features; yield extra bwrap args."""
+    registry = load_feature_registry(config or {})
     extra: list[str] = []
     with ExitStack() as stack:
-        for name in enabled_feature_names(enabled):
-            setup = FEATURES[name].setup
+        for name in enabled_feature_names(enabled, registry):
+            setup = registry[name].setup
             if setup is not None:
                 extra.extend(stack.enter_context(setup()))
         yield extra
 
 
-def format_features_help() -> str:
-    lines = ["Available features (all enabled by default):", ""]
-    width = max(len(name) for name in FEATURE_NAMES)
-    for name in FEATURE_NAMES:
-        feature = FEATURES[name]
-        lines.append(f"  {name:<{width}}  {feature.description}")
+def format_features_help(config: dict | None = None) -> str:
+    registry = load_feature_registry(config or {})
+    names = feature_names(registry)
+    lines = ["Available features:", ""]
+    width = max(len(name) for name in names)
+    for name in names:
+        feature = registry[name]
+        suffix = "" if name in FEATURES else " (custom)"
+        default = "on" if feature.default else "off"
+        lines.append(
+            f"  {name:<{width}}  {feature.description} [default: {default}]{suffix}"
+        )
     return "\n".join(lines)

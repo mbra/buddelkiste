@@ -11,9 +11,12 @@ from buddelkiste.features import (
     base_binds,
     cursor_binds,
     enabled_feature_names,
+    expand_bind_path,
     feature_binds,
     feature_env_var_names,
     format_features_help,
+    interpolate_env,
+    load_feature_registry,
     python_binds,
     resolve_features,
 )
@@ -112,6 +115,95 @@ def test_resolve_features_unknown_raises() -> None:
             executable="foo",
         )
 
+
+def test_interpolate_env_supports_braced_and_bare(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CARGO_HOME", "/tmp/cargo")
+    monkeypatch.setenv("HOME", "/home/me")
+    assert interpolate_env("$CARGO_HOME/git") == "/tmp/cargo/git"
+    assert interpolate_env("${HOME}/.rustup") == "/home/me/.rustup"
+    with pytest.raises(click.ClickException, match="NOT_SET"):
+        interpolate_env("$NOT_SET")
+
+
+def test_expand_bind_path_expands_tilde(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    assert expand_bind_path("~/tools") == str(home / "tools")
+    assert expand_bind_path("${HOME}/tools") == str(home / "tools")
+
+
+def test_toml_custom_feature_registry_and_resolve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cargo = tmp_path / "cargo"
+    cargo.mkdir()
+    monkeypatch.setenv("CARGO_HOME", str(cargo))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+
+    config = {
+        "features": ["rust"],
+        "feature": {
+            "rust": {
+                "description": "Rust toolchain",
+                "default": False,
+                "env": ["CARGO_HOME", "RUSTUP_HOME"],
+                "binds": [
+                    {"source": "$CARGO_HOME", "read_only": False},
+                    {"source": "${HOME}/.rustup", "read_only": True},
+                ],
+            }
+        },
+    }
+    registry = load_feature_registry(config)
+    assert "rust" in registry
+    assert registry["rust"].env_vars == ("CARGO_HOME", "RUSTUP_HOME")
+    assert " (custom)" in format_features_help(config)
+
+    enabled = resolve_features(config)
+    assert enabled["rust"] is True
+    assert enabled["git"] is False
+
+    binds = feature_binds(enabled, config)
+    sources = {getattr(b, "source", None) for b in binds}
+    assert str(cargo) in sources
+    assert str(tmp_path / "home" / ".rustup") in sources
+
+    env_names = feature_env_var_names(enabled, config)
+    assert "CARGO_HOME" in env_names
+    assert "VIRTUAL_ENV" not in env_names
+
+
+def test_toml_feature_rejects_builtin_name() -> None:
+    with pytest.raises(click.ClickException, match="conflicts with built-in"):
+        load_feature_registry({"feature": {"python": {"env": ["FOO"]}}})
+
+
+def test_toml_feature_rejects_unknown_keys() -> None:
+    with pytest.raises(click.ClickException, match="unknown keys"):
+        load_feature_registry({"feature": {"mine": {"script": "nope"}}})
+
+
+def test_enable_custom_toml_feature_via_cli_flag() -> None:
+    config = {
+        "feature": {
+            "labs": {
+                "default": False,
+                "env": ["LAB_TOKEN"],
+                "binds": [{"source": "${HOME}/labs", "read_only": True}],
+            }
+        }
+    }
+    enabled = resolve_features(config, enable=["labs"])
+    assert enabled["labs"] is True
+    assert "LAB_TOKEN" in feature_env_var_names(enabled, config)
+
+
 def test_feature_binds_include_only_enabled_topics(
     tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -165,3 +257,4 @@ def test_format_features_help_lists_topics() -> None:
     assert "cursor" in text
     assert "python" in text
     assert "gui" in text
+    assert "default: on" in text

@@ -10,9 +10,10 @@ can be inspected.
 
 # Features
 
-Optional permission sets are grouped by topic (cursor, python, ssh, ...). All
-are enabled by default. Toggle them with --feature / --no-feature, or in
-~/.config/buddelkiste/config.toml. Use --list-features to print the catalog.
+Optional permission sets are grouped by topic (cursor, python, ssh, ...).
+Built-ins default to on. Toggle them with --feature / --no-feature, or in
+~/.config/buddelkiste/config.toml. Define extra features under [feature.<name>].
+Use --list-features to print the catalog.
 
 Config may set features globally and per executable (matched by path or
 basename of the command being started). A list selects exactly those features;
@@ -43,6 +44,10 @@ supports the following top-level keys:
 features: Global feature selection. Either a list of feature names (allowlist)
 or a table of feature name = true/false overrides.
 
+feature: Table of custom feature definitions under [feature.<name>]. Each may
+set description, default, env (allowlisted variable names), and binds (list of
+source/target/read_only tables). Bind paths may use $VAR or ${VAR}.
+
 executables: Table keyed by executable path or basename. Each entry may contain
 a features list or table, and/or a network table, applied when that executable
 is started.
@@ -64,7 +69,22 @@ envvars: List of additional environment variables for the sandbox. The mandatory
 
 \b
   # Global allowlist (exactly these features)
-  features = ["git", "ssh", "python"]
+  features = ["git", "ssh", "python", "rust"]
+
+\b
+  [feature.rust]
+  description = "Rust toolchain directories"
+  env = ["CARGO_HOME", "RUSTUP_HOME"]
+
+\b
+  [[feature.rust.binds]]
+  source = "$CARGO_HOME"
+  read_only = false
+
+\b
+  [[feature.rust.binds]]
+  source = "${HOME}/.rustup"
+  read_only = true
 
 \b
   [network]
@@ -128,6 +148,7 @@ import click
 from buddelkiste.binds import ROBindConfig, RWBindConfig, get_bind_args
 from buddelkiste.features import (
     FEATURES,
+    expand_bind_path,
     feature_binds,
     feature_env_var_names,
     feature_setup,
@@ -234,11 +255,11 @@ def cli(
 ) -> None:
     logging.basicConfig(level="DEBUG" if debug else "WARNING")
 
-    if list_features or args == ["--list-features"]:
-        click.echo(format_features_help())
-        raise SystemExit(0)
-
     config = load_config()
+
+    if list_features or args == ["--list-features"]:
+        click.echo(format_features_help(config))
+        raise SystemExit(0)
 
     if list_net_presets or args == ["--list-net-presets"]:
         click.echo(format_deny_presets_help(load_deny_preset_registry(config)))
@@ -267,7 +288,7 @@ def cli(
 
     bind_args = get_bind_args(binds)
 
-    with feature_setup(enabled) as setup_args:
+    with feature_setup(enabled, config) as setup_args:
         bwrap_args = [
             "bwrap",
             "--unshare-all",
@@ -304,9 +325,12 @@ def load_config():
 def get_binds(config: dict, enabled: dict[str, bool] | None = None) -> list:
     if enabled is None:
         enabled = resolve_features(config)
-    binds = feature_binds(enabled)
+    binds = feature_binds(enabled, config)
     for bind_params in config.get("binds", ()):
         params = dict(bind_params)
+        params["source"] = expand_bind_path(str(params["source"]))
+        if "target" in params:
+            params["target"] = expand_bind_path(str(params["target"]))
         srcpath = Path(params["source"])
         if not srcpath.exists():
             raise FileNotFoundError(srcpath)
@@ -388,7 +412,7 @@ def get_env_args(config: dict, enabled: dict[str, bool] | None = None) -> Sequen
         enabled = resolve_features(config)
 
     res = []
-    for var_name in feature_env_var_names(enabled):
+    for var_name in feature_env_var_names(enabled, config):
         value = env(var_name)
         if value is not None:
             res.extend(("--setenv", var_name, value))

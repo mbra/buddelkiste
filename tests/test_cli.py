@@ -71,11 +71,20 @@ def test_cli_forwards_help_to_command(
     assert "Sandbox a command using bubblewrap" not in result.output
 
 
-def test_cli_list_features() -> None:
+def test_cli_list_features(tmp_config: Path) -> None:
+    tmp_config.write_text(
+        "[feature.rust]\n"
+        'description = "Rust toolchain"\n'
+        'env = ["CARGO_HOME"]\n',
+        encoding="utf-8",
+    )
+    # CONFIG_PATH is a Path("~/.config/...") object; point load_config at tmp.
     result = CliRunner().invoke(cli, ["--list-features"])
     assert result.exit_code == 0
     assert "cursor" in result.output
     assert "python" in result.output
+    assert "rust" in result.output
+    assert "custom" in result.output
 
 
 def test_cli_disables_feature_via_flag(
