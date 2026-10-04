@@ -1,6 +1,10 @@
 # buddelkiste
 
-Run a command inside a [bubblewrap](https://github.com/containers/bubblewrap) sandbox (`bk`).
+Run a command in a rootless sandbox (`bk`): filesystem and process isolation
+via [bubblewrap](https://github.com/containers/bubblewrap), plus optional
+network controls — share the host stack, cut connectivity entirely, or filter
+egress with pasta/slirp4netns and in-namespace nftables (IP/CIDR and hostname
+rules, no root required).
 
 ## Usage
 
