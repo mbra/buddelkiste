@@ -24,15 +24,32 @@ packages = ["src/buddelkiste"]
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "pytest-cov>=7.0.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["-q"]
+addopts = [
+    "-q",
+    "--cov=buddelkiste",
+    "--cov-report=term-missing",
+]
 markers = [
     "integration: nested-safe integration tests (real bwrap / nested nft)",
     "requires_nested_net: needs unshare --user --map-root-user --net",
     "requires_nested_user: needs unshare --user --map-root-user",
     "requires_tun: needs /dev/net/tun and filter-mode helpers",
     "requires_outbound: needs outbound TCP to 1.1.1.1:443",
+]
+
+[tool.coverage.run]
+branch = true
+source_pkgs = ["buddelkiste"]
+relative_files = true
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_also = [
+    "if __name__ == .__main__.:",
 ]
