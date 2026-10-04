@@ -40,7 +40,7 @@ def integ_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
         "\n"
         "[[binds]]\n"
         f'source = "{work}"\n'
-        "read_only = false\n",
+        'mode = "rw"\n',
         encoding="utf-8",
     )
 

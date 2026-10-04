@@ -164,8 +164,8 @@ def test_toml_custom_feature_registry_and_resolve(
                 "default": False,
                 "env": ["CARGO_HOME", "RUSTUP_HOME"],
                 "binds": [
-                    {"source": "$CARGO_HOME", "read_only": False},
-                    {"source": "${HOME}/.rustup", "read_only": True},
+                    {"source": "$CARGO_HOME", "mode": "rw"},
+                    {"source": "${HOME}/.rustup", "mode": "ro"},
                 ],
             }
         },
@@ -199,13 +199,59 @@ def test_toml_feature_rejects_unknown_keys() -> None:
         load_feature_registry({"feature": {"mine": {"script": "nope"}}})
 
 
+def test_toml_bind_rejects_read_only_key() -> None:
+    config = {
+        "feature": {
+            "mine": {
+                "binds": [{"source": "/tmp", "read_only": True}],
+            }
+        }
+    }
+    registry = load_feature_registry(config)
+    with pytest.raises(click.ClickException, match="read_only"):
+        registry["mine"].binds()
+
+
+def test_toml_bind_overlay_modes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from buddelkiste.binds import (
+        OverlayBindConfig,
+        TmpOverlayBindConfig,
+        overlay_cache_upper,
+    )
+
+    lower = tmp_path / "lower"
+    lower.mkdir()
+    monkeypatch.setenv("UPPER", str(tmp_path / "upper"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    config = {
+        "feature": {
+            "ov": {
+                "binds": [
+                    {"source": str(lower), "mode": "tmp-overlay"},
+                    {"source": str(lower), "mode": "overlay:$UPPER"},
+                    {"source": str(lower), "mode": "overlay"},
+                ],
+            }
+        }
+    }
+    registry = load_feature_registry(config)
+    binds = registry["ov"].binds()
+    assert isinstance(binds[0], TmpOverlayBindConfig)
+    assert isinstance(binds[1], OverlayBindConfig)
+    assert binds[1].upper == str(tmp_path / "upper")
+    assert isinstance(binds[2], OverlayBindConfig)
+    assert Path(binds[2].upper) == overlay_cache_upper(lower)
+
+
 def test_enable_custom_toml_feature_via_cli_flag() -> None:
     config = {
         "feature": {
             "labs": {
                 "default": False,
                 "env": ["LAB_TOKEN"],
-                "binds": [{"source": "${HOME}/labs", "read_only": True}],
+                "binds": [{"source": "${HOME}/labs", "mode": "ro"}],
             }
         }
     }

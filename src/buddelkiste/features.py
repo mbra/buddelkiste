@@ -24,7 +24,13 @@ from typing import Self
 
 import click
 
-from buddelkiste.binds import DevBindConfig, ROBindConfig, RWBindConfig, Tmpfs
+from buddelkiste.binds import (
+    DevBindConfig,
+    ROBindConfig,
+    RWBindConfig,
+    Tmpfs,
+    bind_config,
+)
 
 env = os.getenv
 
@@ -509,29 +515,58 @@ def expand_bind_path(text: str, environ: Mapping[str, str] | None = None) -> str
     return str(Path(interpolate_env(text, environ)).expanduser())
 
 
+def _normalize_bind_mode(mode: str, *, where: str) -> str:
+    """Validate a bind mode and expand ``overlay:<path>`` env vars / ``~``."""
+    if mode in {"ro", "rw", "tmp-overlay", "overlay"}:
+        return mode
+    if mode.startswith("overlay:"):
+        upper = mode.removeprefix("overlay:")
+        if not upper:
+            raise click.ClickException(
+                f"{where}: invalid mode 'overlay:' "
+                "(use 'overlay' for an automatic cache upper, "
+                "or 'overlay:<path>' for an explicit path)"
+            )
+        return f"overlay:{expand_bind_path(upper)}"
+    raise click.ClickException(
+        f"{where}: invalid mode {mode!r} "
+        "(expected 'ro', 'rw', 'tmp-overlay', 'overlay', or 'overlay:<path>')"
+    )
+
+
+def bind_from_spec(spec: dict, *, where: str = "bind"):
+    """Build a bind config from a TOML/config table (``source`` / ``target`` / ``mode``)."""
+    if "source" not in spec:
+        raise click.ClickException(f"{where} missing required key 'source'")
+    if "read_only" in spec:
+        raise click.ClickException(
+            f"{where} uses 'read_only'; use mode = \"ro\"|\"rw\"|"
+            "\"tmp-overlay\"|\"overlay\"|\"overlay:<path>\" instead"
+        )
+    unknown = set(spec) - {"source", "target", "mode"}
+    if unknown:
+        keys = ", ".join(sorted(unknown))
+        raise click.ClickException(f"{where} has unknown keys: {keys}")
+
+    source = expand_bind_path(str(spec["source"]))
+    target = expand_bind_path(str(spec["target"])) if "target" in spec else None
+    mode = _normalize_bind_mode(str(spec.get("mode", "ro")), where=where)
+    try:
+        return bind_config(source, target, mode=mode)
+    except ValueError as exc:
+        raise click.ClickException(f"{where}: {exc}") from exc
+
+
 def _toml_binds_factory(
     bind_specs: Sequence[dict],
     *,
     feature_name: str,
 ) -> Callable[[], list]:
     def binds() -> list:
-        result: list = []
-        for index, spec in enumerate(bind_specs):
-            if "source" not in spec:
-                raise click.ClickException(
-                    f"feature.{feature_name}.binds[{index}] missing required key 'source'"
-                )
-            source = expand_bind_path(str(spec["source"]))
-            target = (
-                expand_bind_path(str(spec["target"])) if "target" in spec else None
-            )
-            read_only = bool(spec.get("read_only", True))
-            cls = ROBindConfig if read_only else RWBindConfig
-            if target is None:
-                result.append(cls(source))
-            else:
-                result.append(cls(source, target))
-        return result
+        return [
+            bind_from_spec(spec, where=f"feature.{feature_name}.binds[{index}]")
+            for index, spec in enumerate(bind_specs)
+        ]
 
     return binds
 

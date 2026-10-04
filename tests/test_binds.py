@@ -111,8 +111,8 @@ def test_get_binds_appends_config_binds(
     binds = get_binds(
         {
             "binds": [
-                {"source": str(extra), "read_only": True},
-                {"source": str(extra), "read_only": False},
+                {"source": str(extra), "mode": "ro"},
+                {"source": str(extra), "mode": "rw"},
             ]
         },
         enabled,
@@ -160,7 +160,7 @@ def test_dev_bind_skips_missing_source(tmp_path: Path) -> None:
     assert list(DevBindConfig(tmp_path / "missing-dev")) == []
 
 
-def test_get_binds_defaults_read_only_true(
+def test_get_binds_defaults_mode_ro(
     tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -179,10 +179,133 @@ def test_get_binds_passes_custom_target(
     extra = tmp_path / "extra"
     extra.mkdir()
     binds = get_binds(
-        {"binds": [{"source": str(extra), "target": "/mnt/extra", "read_only": True}]},
+        {"binds": [{"source": str(extra), "target": "/mnt/extra", "mode": "ro"}]},
         {n: False for n in FEATURE_NAMES},
     )
     assert list(binds[-1]) == ["--ro-bind", str(extra), "/mnt/extra"]
+
+
+def test_tmp_overlay_bind_args(tmp_path: Path) -> None:
+    from buddelkiste.cli import TmpOverlayBindConfig
+
+    src = tmp_path / "lower"
+    src.mkdir()
+    bind = TmpOverlayBindConfig(src, "/mnt/overlay")
+    assert list(bind) == [
+        "--overlay-src",
+        str(src),
+        "--tmp-overlay",
+        "/mnt/overlay",
+    ]
+
+
+def test_tmp_overlay_skips_missing_source(tmp_path: Path) -> None:
+    from buddelkiste.cli import TmpOverlayBindConfig
+
+    assert list(TmpOverlayBindConfig(tmp_path / "missing")) == []
+
+
+def test_persistent_overlay_bind_args(tmp_path: Path) -> None:
+    from buddelkiste.cli import OverlayBindConfig
+
+    src = tmp_path / "lower"
+    src.mkdir()
+    upper = tmp_path / "upper"
+    bind = OverlayBindConfig(src, "/mnt/overlay", upper=upper)
+    assert upper.is_dir()
+    work = Path(bind.work)
+    assert work.is_dir()
+    assert list(work.iterdir()) == []
+    assert list(bind) == [
+        "--overlay-src",
+        str(src),
+        "--overlay",
+        str(upper),
+        str(work),
+        "/mnt/overlay",
+    ]
+
+
+def test_bind_config_modes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from buddelkiste.binds import overlay_cache_upper
+    from buddelkiste.cli import (
+        OverlayBindConfig,
+        TmpOverlayBindConfig,
+        bind_config,
+    )
+
+    cache = tmp_path / "cache"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    src = tmp_path / "src"
+    src.mkdir()
+    assert isinstance(bind_config(src, mode="ro"), ROBindConfig)
+    assert isinstance(bind_config(src, mode="rw"), RWBindConfig)
+    assert isinstance(bind_config(src, mode="tmp-overlay"), TmpOverlayBindConfig)
+    overlay = bind_config(src, mode=f"overlay:{tmp_path / 'up'}")
+    assert isinstance(overlay, OverlayBindConfig)
+    auto = bind_config(src, mode="overlay")
+    assert isinstance(auto, OverlayBindConfig)
+    assert Path(auto.upper) == overlay_cache_upper(src)
+    assert Path(auto.upper).is_relative_to(cache / "buddelkiste" / "overlays")
+    with pytest.raises(ValueError, match="Invalid bind mode"):
+        bind_config(src, mode="write")
+
+
+def test_overlay_cache_upper_is_stable_for_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from buddelkiste.binds import overlay_cache_upper
+
+    cache = tmp_path / "cache"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    src = tmp_path / "proj"
+    src.mkdir()
+    first = overlay_cache_upper(src)
+    second = overlay_cache_upper(src)
+    other = overlay_cache_upper(tmp_path / "other")
+    assert first == second
+    assert first != other
+    assert first.parent == cache / "buddelkiste" / "overlays"
+
+
+def test_get_binds_overlay_modes(
+    tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from buddelkiste.binds import overlay_cache_upper
+    from buddelkiste.cli import OverlayBindConfig, TmpOverlayBindConfig
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("OVERLAY_UPPER", str(tmp_path / "persisted"))
+    (tmp_path / "home").mkdir()
+    lower = tmp_path / "lower"
+    lower.mkdir()
+
+    binds = get_binds(
+        {
+            "binds": [
+                {"source": str(lower), "mode": "tmp-overlay"},
+                {
+                    "source": str(lower),
+                    "target": "/mnt/ov",
+                    "mode": "overlay:$OVERLAY_UPPER",
+                },
+                {"source": str(lower), "mode": "overlay"},
+            ]
+        },
+        {n: False for n in FEATURE_NAMES},
+    )
+    assert isinstance(binds[-3], TmpOverlayBindConfig)
+    assert isinstance(binds[-2], OverlayBindConfig)
+    assert binds[-2].upper == str(tmp_path / "persisted")
+    assert list(binds[-2])[:4] == [
+        "--overlay-src",
+        str(lower),
+        "--overlay",
+        str(tmp_path / "persisted"),
+    ]
+    assert isinstance(binds[-1], OverlayBindConfig)
+    assert Path(binds[-1].upper) == overlay_cache_upper(lower)
 
 
 def test_get_bind_args_skips_missing_ro(tmp_path: Path) -> None:

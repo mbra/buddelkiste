@@ -24,23 +24,23 @@ def test_load_config_missing_returns_empty(tmp_config: Path) -> None:
 
 def test_load_config_reads_toml(tmp_config: Path) -> None:
     tmp_config.write_text(
-        '[[binds]]\nsource = "/tmp"\nread_only = false\n\n'
+        '[[binds]]\nsource = "/tmp"\nmode = "rw"\n\n'
         '[[envvars]]\nname = "FOO"\nvalue = "bar"\n',
         encoding="utf-8",
     )
     config = load_config()
     assert config["binds"][0]["source"] == "/tmp"
-    assert config["binds"][0]["read_only"] is False
+    assert config["binds"][0]["mode"] == "rw"
     assert config["envvars"][0] == {"name": "FOO", "value": "bar"}
 
 
 def test_add_bind_to_config_creates_file(tmp_config: Path, tmp_path: Path) -> None:
     source = tmp_path / "proj"
     source.mkdir()
-    add_bind_to_config(source, read_only=False)
+    add_bind_to_config(source, mode="rw")
 
     data = tomllib.loads(tmp_config.read_text(encoding="utf-8"))
-    assert data["binds"] == [{"source": str(source), "read_only": False}]
+    assert data["binds"] == [{"source": str(source), "mode": "rw"}]
 
 
 def test_add_bind_to_config_appends_with_separator(
@@ -51,12 +51,12 @@ def test_add_bind_to_config_appends_with_separator(
 
     source = tmp_path / "proj"
     source.mkdir()
-    add_bind_to_config(source, read_only=True)
+    add_bind_to_config(source, mode="ro")
 
     text = tmp_config.read_text(encoding="utf-8")
     assert text.startswith('[[envvars]]\nname = "A"\n\n[[binds]]\n')
     data = tomllib.loads(text)
-    assert data["binds"][0]["read_only"] is True
+    assert data["binds"][0]["mode"] == "ro"
 
 
 def test_get_env_args_shares_known_vars(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -138,7 +138,7 @@ def test_ensure_cwd_always_persists(
     assert isinstance(binds[0], ROBindConfig)
     data = tomllib.loads(tmp_config.read_text(encoding="utf-8"))
     assert data["binds"][0]["source"] == str(tmp_path)
-    assert data["binds"][0]["read_only"] is True
+    assert data["binds"][0]["mode"] == "ro"
 
 
 def test_ensure_cwd_abort(
@@ -156,7 +156,7 @@ def test_add_bind_to_config_escapes_special_chars(
 ) -> None:
     source = tmp_path / 'proj"quote\\slash'
     source.mkdir()
-    add_bind_to_config(source, read_only=True)
+    add_bind_to_config(source, mode="ro")
     data = tomllib.loads(tmp_config.read_text(encoding="utf-8"))
     assert data["binds"][0]["source"] == str(source)
 
@@ -171,7 +171,7 @@ def test_permanent_bind_roundtrip(
     (tmp_path / "home").mkdir()
     source = tmp_path / "proj"
     source.mkdir()
-    add_bind_to_config(source, read_only=False)
+    add_bind_to_config(source, mode="rw")
 
     config = load_config()
     binds = get_binds(config, {name: False for name in FEATURE_NAMES})

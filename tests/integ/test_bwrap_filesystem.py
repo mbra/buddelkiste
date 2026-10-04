@@ -45,11 +45,11 @@ def test_ro_config_bind_not_writable(
         "\n"
         "[[binds]]\n"
         f'source = "{integ_workspace["work"]}"\n'
-        "read_only = false\n"
+        'mode = "rw"\n'
         "\n"
         "[[binds]]\n"
         f'source = "{ro_dir}"\n'
-        "read_only = true\n",
+        'mode = "ro"\n',
         encoding="utf-8",
     )
 
@@ -160,12 +160,12 @@ def test_custom_target_mount(
         "\n"
         "[[binds]]\n"
         f'source = "{integ_workspace["work"]}"\n'
-        "read_only = false\n"
+        'mode = "rw"\n'
         "\n"
         "[[binds]]\n"
         f'source = "{src}"\n'
         'target = "/mnt/alias"\n'
-        "read_only = true\n",
+        'mode = "ro"\n',
         encoding="utf-8",
     )
 
@@ -179,3 +179,79 @@ def test_custom_target_mount(
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "via-target\n"
+
+
+def test_tmp_overlay_writable_without_host_mutation(
+    run_bk, integ_workspace: dict[str, Path]
+) -> None:
+    lower = integ_workspace["home"].parent / "overlay-lower"
+    lower.mkdir()
+    marker = lower / "marker.txt"
+    marker.write_text("base\n", encoding="utf-8")
+
+    config = integ_workspace["config"]
+    config.write_text(
+        "features = []\n"
+        "\n"
+        "[[binds]]\n"
+        f'source = "{integ_workspace["work"]}"\n'
+        'mode = "rw"\n'
+        "\n"
+        "[[binds]]\n"
+        f'source = "{lower}"\n'
+        'mode = "tmp-overlay"\n',
+        encoding="utf-8",
+    )
+
+    extra = lower / "extra.txt"
+    proc = run_bk(
+        "--network",
+        "none",
+        "--",
+        "/bin/sh",
+        "-c",
+        f"echo changed > '{marker}' && cat '{marker}' && echo new > '{extra}'",
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "changed\n" in proc.stdout
+    assert marker.read_text(encoding="utf-8") == "base\n"
+    assert not extra.exists()
+
+
+def test_persistent_overlay_writes_to_upper(
+    run_bk, integ_workspace: dict[str, Path]
+) -> None:
+    lower = integ_workspace["home"].parent / "persist-lower"
+    upper = integ_workspace["home"].parent / "persist-upper"
+    lower.mkdir()
+    marker = lower / "marker.txt"
+    extra = lower / "extra.txt"
+    marker.write_text("base\n", encoding="utf-8")
+
+    config = integ_workspace["config"]
+    config.write_text(
+        "features = []\n"
+        "\n"
+        "[[binds]]\n"
+        f'source = "{integ_workspace["work"]}"\n'
+        'mode = "rw"\n'
+        "\n"
+        "[[binds]]\n"
+        f'source = "{lower}"\n'
+        f'mode = "overlay:{upper}"\n',
+        encoding="utf-8",
+    )
+
+    proc = run_bk(
+        "--network",
+        "none",
+        "--",
+        "/bin/sh",
+        "-c",
+        f"echo changed > '{marker}' && echo new > '{extra}'",
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert marker.read_text(encoding="utf-8") == "base\n"
+    assert not extra.exists()
+    assert (upper / "marker.txt").read_text(encoding="utf-8") == "changed\n"
+    assert (upper / "extra.txt").read_text(encoding="utf-8") == "new\n"

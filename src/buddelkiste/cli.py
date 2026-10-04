@@ -47,7 +47,7 @@ or a table of feature name = true/false overrides.
 
 feature: Table of custom feature definitions under [feature.<name>]. Each may
 set description, default, env (allowlisted variable names), and binds (list of
-source/target/read_only tables). Bind paths may use $VAR or ${VAR}. Packages
+source/target/mode tables). Bind paths may use $VAR or ${VAR}. Packages
 may also register features via the buddelkiste.features entry-point group.
 
 executables: Table keyed by executable path or basename. Each entry may contain
@@ -58,10 +58,14 @@ network: Global network settings (mode, policy, allow, deny, deny_presets).
 Optional [network.presets] defines custom named deny lists. See example.
 
 binds: List of additional bind mounts for the sandbox with "source", "target"
-and "read_only" keys. The "source" key is mandatory and gives the host directory
+and "mode" keys. The "source" key is mandatory and gives the host directory
 to bind into the sandbox. The "target" key is optional and gives the mountpoint
-inside the sandbox; this defaults to the host-side path. The "read_only" key
-defaults to true.
+inside the sandbox; this defaults to the host-side path. The "mode" key defaults
+to "ro" (read-only). Other modes: "rw" (read-write bind), "tmp-overlay"
+(writable via ephemeral overlayfs; host source unchanged), "overlay"
+(writable via overlayfs with a persistent upper under
+$XDG_CACHE_HOME/buddelkiste/overlays/<hash-of-source>), or
+"overlay:<path>" (explicit persistent upper; <path> may use $VAR / ${VAR}).
 
 envvars: List of additional environment variables for the sandbox. The mandatory
 "name" key gives the name of the variable. The value can be specified in the
@@ -81,12 +85,12 @@ envvars: List of additional environment variables for the sandbox. The mandatory
 \b
   [[feature.rust.binds]]
   source = "$CARGO_HOME"
-  read_only = false
+  mode = "rw"
 
 \b
   [[feature.rust.binds]]
   source = "${HOME}/.rustup"
-  read_only = true
+  mode = "ro"
 
 \b
   [network]
@@ -117,7 +121,7 @@ envvars: List of additional environment variables for the sandbox. The mandatory
 \b
   [[binds]]
   source = "/path/to/directory"  # path is whitelisted for the sandbox
-  read_only = true  # change to false to give the sandbox write access
+  mode = "ro"  # or "rw", "tmp-overlay", "overlay", "overlay:$XDG_CACHE_HOME/bk-upper"
 
 \b
   [[envvars]]
@@ -147,10 +151,10 @@ from pathlib import Path
 
 import click
 
-from buddelkiste.binds import ROBindConfig, RWBindConfig, get_bind_args
+from buddelkiste.binds import ROBindConfig, RWBindConfig, bind_config, get_bind_args
 from buddelkiste.features import (
     FEATURES,
-    expand_bind_path,
+    bind_from_spec,
     feature_binds,
     feature_env_var_names,
     feature_setup,
@@ -328,17 +332,11 @@ def get_binds(config: dict, enabled: dict[str, bool] | None = None) -> list:
     if enabled is None:
         enabled = resolve_features(config)
     binds = feature_binds(enabled, config)
-    for bind_params in config.get("binds", ()):
-        params = dict(bind_params)
-        params["source"] = expand_bind_path(str(params["source"]))
-        if "target" in params:
-            params["target"] = expand_bind_path(str(params["target"]))
-        srcpath = Path(params["source"])
-        if not srcpath.exists():
-            raise FileNotFoundError(srcpath)
-        read_only = params.pop("read_only", True)
-        config_cls = ROBindConfig if read_only else RWBindConfig
-        binds.append(config_cls(**params))
+    for index, bind_params in enumerate(config.get("binds", ())):
+        bind = bind_from_spec(dict(bind_params), where=f"binds[{index}]")
+        if not Path(bind.source).exists():
+            raise FileNotFoundError(bind.source)
+        binds.append(bind)
     return binds
 
 
@@ -378,17 +376,16 @@ def ensure_cwd_in_sandbox(binds: list) -> None:
     if choice == "no":
         raise click.Abort()
 
-    read_only = not click.confirm("Allow write access?", default=True, err=True)
+    mode = "rw" if click.confirm("Allow write access?", default=True, err=True) else "ro"
 
     if choice == "always":
-        add_bind_to_config(cwd, read_only=read_only)
+        add_bind_to_config(cwd, mode=mode)
         click.echo(f"Added {cwd} to {CONFIG_PATH}.", err=True)
 
-    bind_cls = ROBindConfig if read_only else RWBindConfig
-    binds.append(bind_cls(cwd))
+    binds.append(bind_config(cwd, mode=mode))
 
 
-def add_bind_to_config(source: Path, *, read_only: bool) -> None:
+def add_bind_to_config(source: Path, *, mode: str = "ro") -> None:
     """Append a `[[binds]]` entry for `source` to the configuration file."""
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -402,7 +399,7 @@ def add_bind_to_config(source: Path, *, read_only: bool) -> None:
     entry = [
         "[[binds]]",
         f"source = {json.dumps(str(source))}",
-        f"read_only = {json.dumps(read_only)}",
+        f"mode = {json.dumps(mode)}",
     ]
 
     with path.open("a") as fobj:
@@ -468,6 +465,8 @@ def log_cmdline(cmdline):
 from buddelkiste.binds import (  # noqa: E402
     BasicBindConfig,
     DevBindConfig,
+    OverlayBindConfig,
+    TmpOverlayBindConfig,
     Tmpfs,
 )
 from buddelkiste.features import SshAgent, find_sandbox_ssh_key  # noqa: E402
@@ -476,11 +475,14 @@ __all__ = [
     "BasicBindConfig",
     "DevBindConfig",
     "FEATURES",
+    "OverlayBindConfig",
     "ROBindConfig",
     "RWBindConfig",
     "SshAgent",
+    "TmpOverlayBindConfig",
     "Tmpfs",
     "add_bind_to_config",
+    "bind_config",
     "cli",
     "ensure_cwd_in_sandbox",
     "find_sandbox_ssh_key",

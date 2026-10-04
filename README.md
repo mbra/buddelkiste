@@ -37,7 +37,9 @@ Configuration (`~/.config/buddelkiste/config.toml`) can set a global feature lis
 per-executable overrides under `[executables.<name>]`, and `[network]` /
 `[executables.<name>.network]` for IP/CIDR and hostname filtering. Custom deny
 presets go under `[network.presets]`. Custom features go under `[feature.<name>]`
-with `env` allowlists and `binds` (paths may use `$VAR` / `${VAR}`). Installed
+with `env` allowlists and `binds` (paths may use `$VAR` / `${VAR}`; bind
+`mode` is `ro` (default), `rw`, `tmp-overlay`, `overlay`, or `overlay:<path>`).
+Installed
 packages can register features via the `buddelkiste.features` entry-point group.
 `--list-features` shows each feature's module path. See `bk --help`.
 
