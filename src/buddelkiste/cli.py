@@ -1,17 +1,27 @@
 """Sandbox a command using bubblewrap.
 
 Pass the executable and its arguments on the command line. They are run inside
-a bubblewrap sandbox. The wrapper's own option is --debug; everything else is
-forwarded as the sandboxed command.
+a bubblewrap sandbox. Wrapper options are --debug and feature toggles; everything
+else is forwarded as the sandboxed command.
 
 With no command, a login shell is started inside the sandbox so the environment
 can be inspected.
+
+
+# Features
+
+Optional permission sets are grouped by topic (cursor, python, ssh, ...). All
+are enabled by default. Toggle them with --feature / --no-feature, or in
+~/.config/buddelkiste/config.toml under [features]. Use --list-features to print the
+catalog.
 
 
 # Configuration
 
 Additional configuration is read from ~/.config/buddelkiste/config.toml. The file
 supports the following top-level keys:
+
+features: Table of feature name = true/false overrides.
 
 binds: List of additional bind mounts for the sandbox with "source", "target"
 and "read_only" keys. The "source" key is mandatory and gives the host directory
@@ -26,6 +36,10 @@ envvars: List of additional environment variables for the sandbox. The mandatory
 ## Example for a ~/.config/buddelkiste/config.toml configuration
 
 \b
+  [features]
+  gui = false
+  google = false
+
   [[binds]]
   source = "/path/to/directory"  # path is whitelisted for the sandbox
   read_only = true  # change to false to give the sandbox write access
@@ -50,18 +64,27 @@ import json
 import logging
 import os
 import pwd
-import shutil
 import subprocess
 import sys
-import tempfile
-import time
 import tomllib
-from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Self
 
 import click
+
+from buddelkiste.binds import ROBindConfig, RWBindConfig, get_bind_args
+from buddelkiste.features import (
+    FEATURES,
+    feature_binds,
+    feature_env_var_names,
+    feature_setup,
+    format_features_help,
+    resolve_features,
+)
+
+env = os.getenv
+
+CONFIG_PATH = Path("~/.config/buddelkiste/config.toml")
 
 
 @click.command(
@@ -77,6 +100,25 @@ import click
     is_flag=True,
     default=False,
 )
+@click.option(
+    "--feature",
+    "-f",
+    "enable_features",
+    multiple=True,
+    help="Enable a feature (repeatable). See --list-features.",
+)
+@click.option(
+    "--no-feature",
+    "disable_features",
+    multiple=True,
+    help="Disable a feature (repeatable). See --list-features.",
+)
+@click.option(
+    "--list-features",
+    is_flag=True,
+    default=False,
+    help="List available features and exit",
+)
 @click.argument(
     "args",
     nargs=-1,
@@ -84,30 +126,32 @@ import click
 )
 def cli(
     debug: bool,
+    enable_features: tuple[str, ...],
+    disable_features: tuple[str, ...],
+    list_features: bool,
     args: list[str],
 ) -> None:
     logging.basicConfig(level="DEBUG" if debug else "WARNING")
 
+    if list_features or args == ["--list-features"]:
+        click.echo(format_features_help())
+        raise SystemExit(0)
+
     config = load_config()
-    binds = get_binds(config)
-    env_args = get_env_args(config)
+    enabled = resolve_features(
+        config,
+        enable=enable_features,
+        disable=disable_features,
+    )
+    binds = get_binds(config, enabled)
+    env_args = get_env_args(config, enabled)
     command = resolve_launch_command(args)
 
     ensure_cwd_in_sandbox(binds)
 
     bind_args = get_bind_args(binds)
 
-    with SshAgent() as ssh_agent:
-        if ssh_key := find_sandbox_ssh_key():
-            ssh_agent.add_key(ssh_key)
-
-        ssh_args = [
-            *ROBindConfig(ssh_agent.socket),
-            "--setenv",
-            "SSH_AUTH_SOCK",
-            str(ssh_agent.socket),
-        ]
-
+    with feature_setup(enabled) as setup_args:
         bwrap_args = [
             "bwrap",
             "--unshare-all",
@@ -118,7 +162,7 @@ def cli(
             str(Path.cwd()),
             *bind_args,
             *env_args,
-            *ssh_args,
+            *setup_args,
             "--",
             *command,
         ]
@@ -140,213 +184,19 @@ def load_config():
         return tomllib.load(fobj)
 
 
-ENV_VARS_TO_SHARE = [
-    "ASDF_DIR",
-    "BUN_INSTALL",
-    "COLORTERM",
-    "DBUS_SESSION_BUS_ADDRESS",
-    "DISPLAY",
-    "DOCKER_HOST",
-    "EDITOR",
-    "HOME",
-    "LANG",
-    "LC_NUMERIC",
-    "LC_TIME",
-    "MOZ_ENABLE_WAYLAND",
-    "PATH",
-    "PIP_REQUIRE_VIRTUALENV",
-    "SHELL",
-    "TERM",
-    "TERMINFO",
-    "TERM_PROGRAM",
-    "VIRTUAL_ENV",
-    "WAYLAND_DISPLAY",
-    "WORKON_HOME",
-    "XAUTHORITY",
-    "XCURSOR_SIZE",
-    "XDG_CONFIG_HOME",
-    "XDG_CURRENT_DESKTOP",
-    "XDG_RUNTIME_DIR",
-    "XDG_SESSION_TYPE",
-]
-
-
-@dataclass
-class BasicBindConfig:
-    source: Path | str
-    target: Path | str | None = None
-    flag: str | None = None
-
-    def __post_init__(self):
-        self.source = os.fspath(self.source)
-        if self.target is None:
-            self.target = self.source
-        else:
-            self.target = os.fspath(self.target)
-
-    def __iter__(self) -> Iterator[str]:
-        if self.flag is None:
-            raise TypeError(f"{type(self).__name__} requires a bind flag")
-        srcpath = Path(self.source)
-        if srcpath.exists():
-            yield from [self.flag, self.source, self.target]
-
-    def covers_path(self, path: Path) -> bool:
-        source = Path(self.source)
-        if not source.exists():
-            return False
-        path = path.resolve()
-        source = source.resolve()
-        return path == source or path in source.parents or source in path.parents
-
-
-@dataclass
-class ROBindConfig(BasicBindConfig):
-    """Read only binds"""
-
-    flag: str = "--ro-bind"
-
-
-@dataclass
-class RWBindConfig(BasicBindConfig):
-    """Read + write binds"""
-
-    flag: str = "--bind"
-
-    def __post_init__(self):
-        super().__post_init__()
-        srcpath = Path(self.source)
-        if not srcpath.exists():
-            srcpath.mkdir(parents=True)
-
-
-@dataclass
-class DevBindConfig(BasicBindConfig):
-    flag: str = "--dev-bind"
-
-
-@dataclass
-class Tmpfs:
-    target: Path | str
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(("--tmpfs", os.fspath(self.target)))
-
-
-env = os.getenv
-
-
-def get_default_binds():
-    RUNTIME = Path(env("XDG_RUNTIME_DIR"))
-    HOME = Path.home()
-    res = [
-        # Basics
-        ("--dev", "/dev"),
-        ("--proc", "/proc"),
-        # tmpfs
-        Tmpfs("/dev/shm"),
-        Tmpfs("/run"),
-        Tmpfs("/tmp"),
-        # Sysfs
-        ROBindConfig("/sys/dev/char"),
-        ROBindConfig("/sys/devices"),
-        ROBindConfig("/sys/class"),
-        # /run
-        ("--dir", "/run/dbus"),
-        ROBindConfig("/run/dbus/system_bus_socket"),
-        # /dev
-        DevBindConfig("/dev/dri"),
-        DevBindConfig("/dev/snd"),
-        # Runtime dir
-        ("--dir", str(RUNTIME)),
-        ROBindConfig(RUNTIME / "bus"),
-        RWBindConfig(RUNTIME / "dbus-1"),
-        # System read only
-        ROBindConfig("/usr"),
-        ROBindConfig("/usr/libexec/flatpak-xdg-utils/xdg-open", "/usr/bin/xdg-open"),
-        ROBindConfig("/lib"),
-        ROBindConfig("/lib64"),
-        ROBindConfig("/bin"),
-        ROBindConfig("/etc/resolv.conf"),
-        ROBindConfig("/etc/hosts"),
-        ROBindConfig("/etc/ssl"),
-        ROBindConfig("/etc/passwd"),
-        ROBindConfig("/etc/group"),
-        ROBindConfig("/etc/alternatives"),
-        ROBindConfig("/etc/ca-certificates"),
-        ROBindConfig("/etc/java-17-openjdk"),
-        ROBindConfig("/etc/java-21-openjdk"),
-        ROBindConfig("/etc/fonts"),
-        ROBindConfig("/opt/cursor-agent"),
-        ROBindConfig("/opt/google"),
-        ROBindConfig("/tmp/.X11-unix"),
-        ROBindConfig("/usr/share/cursor"),
-        # Home read only
-        ROBindConfig(HOME / ".agents"),
-        ROBindConfig(HOME / ".asdf"),
-        ROBindConfig(HOME / ".bun"),
-        ROBindConfig(HOME / ".config/agents"),
-        ROBindConfig(HOME / ".config/git"),
-        ROBindConfig(HOME / ".cursorignore"),
-        ROBindConfig(HOME / ".docker"),
-        ROBindConfig(HOME / ".gitconfig"),
-        ROBindConfig(HOME / ".local"),
-        ROBindConfig(HOME / ".npmrc"),
-        ROBindConfig(HOME / ".nvm"),
-        ROBindConfig(HOME / ".pip"),
-        ROBindConfig(HOME / ".ssh/config"),
-        ROBindConfig(HOME / ".tool-versions"),
-        ROBindConfig(HOME / "nvim"),
-        # Home read-write
-        RWBindConfig(HOME / ".cache"),
-        RWBindConfig(HOME / ".config/Cursor"),
-        RWBindConfig(HOME / ".config/cursor"),
-        RWBindConfig(HOME / ".cursor"),
-        RWBindConfig(HOME / ".local/share/cursor"),
-        RWBindConfig(HOME / ".local/state/cursor"),
-        RWBindConfig(HOME / ".npm"),
-        RWBindConfig(env("WORKON_HOME", HOME / ".virtualenvs")),
-        # Whiteouts; these must be last
-        #Tmpfs(DEV_ROOT / "infrastructure/puppetcfg"),
-    ]
-
-    # Hide credentials in the devscripts repo with an empty file.
-    empty = Path("/dev/null")
-    empty.open("wb").close()
-
-    if wayland_display := env("WAYLAND_DISPLAY"):
-        res.append(ROBindConfig(RUNTIME / wayland_display))
-
-    if xauthority := env("XAUTHORITY"):
-        res.append(ROBindConfig(xauthority))
-
-    if docker_host := env("DOCKER_HOST"):
-        docker_host = docker_host.removeprefix("unix://")
-        if docker_host.startswith(env("XDG_RUNTIME_DIR")):  # user-level Docker daemon
-            res.append(ROBindConfig(docker_host))
-
-    return res
-
-
-def get_binds(config: dict) -> list:
-    binds = get_default_binds()
+def get_binds(config: dict, enabled: dict[str, bool] | None = None) -> list:
+    if enabled is None:
+        enabled = resolve_features(config)
+    binds = feature_binds(enabled)
     for bind_params in config.get("binds", ()):
-        srcpath = Path(bind_params["source"])
+        params = dict(bind_params)
+        srcpath = Path(params["source"])
         if not srcpath.exists():
             raise FileNotFoundError(srcpath)
-        config_cls = ROBindConfig if bind_params.pop("read_only", True) else RWBindConfig
-        binds.append(config_cls(**bind_params))
+        read_only = params.pop("read_only", True)
+        config_cls = ROBindConfig if read_only else RWBindConfig
+        binds.append(config_cls(**params))
     return binds
-
-
-def get_bind_args(binds) -> Sequence[str]:
-    res = []
-    for bind in binds:
-        res.extend(bind)
-    return res
-
-
-CONFIG_PATH = Path("~/.config/buddelkiste/config.toml")
 
 
 def config_path() -> Path:
@@ -416,10 +266,12 @@ def add_bind_to_config(source: Path, *, read_only: bool) -> None:
         fobj.write(prefix + "\n".join(entry) + "\n")
 
 
-def get_env_args(config: dict) -> Sequence[str]:
-    res = []
+def get_env_args(config: dict, enabled: dict[str, bool] | None = None) -> Sequence[str]:
+    if enabled is None:
+        enabled = resolve_features(config)
 
-    for var_name in ENV_VARS_TO_SHARE:
+    res = []
+    for var_name in feature_env_var_names(enabled):
         value = env(var_name)
         if value is not None:
             res.extend(("--setenv", var_name, value))
@@ -432,73 +284,6 @@ def get_env_args(config: dict) -> Sequence[str]:
         res.extend(("--setenv", var_name, value))
 
     return res
-
-
-class SshAgent:
-    socket: Path
-    process: subprocess.Popen
-    directory: Path
-
-    def __init__(self):
-        self.socket = None
-        self._proc = None
-        self._agent_dir = None
-
-    def __enter__(self) -> Self:
-        agent_dir = Path(tempfile.mkdtemp(prefix="bwrapssh", dir=env("XDG_RUNTIME_DIR")))
-        socket = agent_dir / "sock"
-
-        proc = subprocess.Popen(
-            ["ssh-agent", "-D", "-a", str(socket)],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-        )
-
-        try:
-            for _ in range(50):  # pragma: nobranch
-                if socket.is_socket():
-                    break
-                if proc.poll() is not None:
-                    raise click.ClickException("ssh-agent exited during startup.")
-                time.sleep(0.1)
-            else:  # pragma: nocover
-                raise click.ClickException(f"timed out waiting for ssh-agent socket at {socket}.")
-        except BaseException:
-            proc.terminate()
-            raise
-
-        self._proc = proc
-        self._agent_dir = agent_dir
-        self.socket = socket
-
-        return self
-
-    def add_key(self, path: Path):
-        subprocess.run(
-            ["ssh-add", "-q", str(path)],
-            env={**os.environ, "SSH_AUTH_SOCK": str(self.socket)},
-            check=True,
-        )
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        proc = self._proc
-        self._proc = None
-
-        proc.terminate()
-
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:  # pragma: nocover
-            proc.kill()
-
-        shutil.rmtree(self._agent_dir, ignore_errors=True)
-
-
-def find_sandbox_ssh_key() -> Path | None:
-    for path in Path("~/.ssh").expanduser().glob("sandbox_*"):
-        if not path.name.endswith(".pub"):
-            return path
-    return None
 
 
 def resolve_launch_command(args: list[str]) -> list[str]:
@@ -527,3 +312,32 @@ def log_cmdline(cmdline):
             group.clear()
         group.append(arg)
     logging.debug("  %s", " ".join(group))
+
+
+# Re-export bind helpers for tests and callers that imported them from cli.
+from buddelkiste.binds import (  # noqa: E402
+    BasicBindConfig,
+    DevBindConfig,
+    Tmpfs,
+)
+from buddelkiste.features import SshAgent, find_sandbox_ssh_key  # noqa: E402
+
+__all__ = [
+    "BasicBindConfig",
+    "DevBindConfig",
+    "FEATURES",
+    "ROBindConfig",
+    "RWBindConfig",
+    "SshAgent",
+    "Tmpfs",
+    "add_bind_to_config",
+    "cli",
+    "ensure_cwd_in_sandbox",
+    "find_sandbox_ssh_key",
+    "get_bind_args",
+    "get_binds",
+    "get_env_args",
+    "load_config",
+    "resolve_features",
+    "resolve_launch_command",
+]
