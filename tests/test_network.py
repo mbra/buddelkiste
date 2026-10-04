@@ -31,6 +31,31 @@ def test_canonicalize_cidr_rejects_hostname() -> None:
         canonicalize_cidr("example.com")
 
 
+def test_resolve_network_accepts_hostnames() -> None:
+    net = resolve_network(
+        {
+            "network": {
+                "mode": "filter",
+                "allow": ["1.1.1.1/32", "api.github.com", "*.pypi.org"],
+                "deny": ["evil.example"],
+            }
+        }
+    )
+    assert net.allow == ["1.1.1.1/32"]
+    assert net.allow_hosts == ["api.github.com", "*.pypi.org"]
+    assert net.deny_hosts == ["evil.example"]
+    assert net.needs_dns_proxy is True
+
+
+def test_build_nft_ruleset_includes_dns_redirect_and_dyn_sets() -> None:
+    net = NetworkConfig(mode="filter", policy="deny", allow=["1.1.1.1/32"])
+    rules = build_nft_ruleset(net, dns_proxy=True)
+    assert "dyn_allow4" in rules
+    assert "dns_redirect" in rules
+    assert "redirect to :15353" in rules
+    assert "127.0.0.1/32" in rules
+
+
 def test_resolve_network_defaults() -> None:
     net = resolve_network({})
     assert net.mode == "host"

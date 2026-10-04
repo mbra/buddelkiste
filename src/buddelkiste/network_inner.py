@@ -31,13 +31,15 @@ def main(argv: list[str] | None = None) -> None:
         policy=net_data["policy"],
         allow=list(net_data.get("allow", [])),
         deny=list(net_data.get("deny", [])),
+        allow_hosts=list(net_data.get("allow_hosts", [])),
+        deny_hosts=list(net_data.get("deny_hosts", [])),
+        deny_presets=list(net_data.get("deny_presets", [])),
     )
     try:
-        run_network_inner(net, bwrap_args, start_slirp=start_slirp)
+        raise SystemExit(run_network_inner(net, bwrap_args, start_slirp=start_slirp))
     except click.ClickException as exc:
         click.echo(f"Error: {exc.format_message()}", err=True)
         raise SystemExit(1) from exc
-    raise SystemExit("network_inner: exec failed")
 
 
 if __name__ == "__main__":

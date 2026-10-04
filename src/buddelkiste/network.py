@@ -5,9 +5,10 @@ Modes:
   none   — private empty netns (no connectivity)
   filter — private netns via pasta/slirp4netns with in-namespace nftables
 
-Filter mode needs no root and no host IP/subnet reservation. Rules are IP/CIDR
-literals only. DNS resolver addresses from /etc/resolv.conf are auto-allowed so
-name resolution keeps working under a default-deny policy.
+Filter mode needs no root and no host IP/subnet reservation. Rules accept
+IP/CIDR literals and hostnames (exact or ``*.suffix``). Hostnames are enforced
+via a DNS proxy that publishes resolved A/AAAA addresses into dynamic nft sets.
+DNS resolver addresses from /etc/resolv.conf are auto-allowed.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import json
 import logging
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -27,6 +29,12 @@ from pathlib import Path
 
 import click
 
+from buddelkiste.dns_proxy import (
+    DNS_PROXY_PORT,
+    DnsProxy,
+    is_valid_hostname_pattern,
+    nft_add_allow_ip,
+)
 from buddelkiste.features import lookup_executable_config
 
 log = logging.getLogger(__name__)
@@ -60,24 +68,29 @@ class NetworkConfig:
     allow: list[str] = field(default_factory=list)
     deny: list[str] = field(default_factory=list)
     deny_presets: list[str] = field(default_factory=list)
+    allow_hosts: list[str] = field(default_factory=list)
+    deny_hosts: list[str] = field(default_factory=list)
 
     def normalized(self) -> NetworkConfig:
         presets = validate_deny_presets(self.deny_presets)
-        deny = list(
-            dict.fromkeys(
-                [
-                    *[canonicalize_cidr(c) for c in self.deny],
-                    *expand_deny_presets(presets),
-                ]
-            )
-        )
+        allow_cidrs, allow_hosts = split_targets(self.allow)
+        deny_cidrs, deny_hosts = split_targets(self.deny)
+        deny_cidrs = list(dict.fromkeys([*deny_cidrs, *expand_deny_presets(presets)]))
+        allow_hosts = list(dict.fromkeys([*allow_hosts, *self.allow_hosts]))
+        deny_hosts = list(dict.fromkeys([*deny_hosts, *self.deny_hosts]))
         return NetworkConfig(
             mode=self.mode,
             policy=self.policy,
-            allow=[canonicalize_cidr(c) for c in self.allow],
-            deny=deny,
+            allow=allow_cidrs,
+            deny=deny_cidrs,
             deny_presets=presets,
+            allow_hosts=allow_hosts,
+            deny_hosts=deny_hosts,
         )
+
+    @property
+    def needs_dns_proxy(self) -> bool:
+        return bool(self.allow_hosts or self.deny_hosts)
 
 
 def validate_deny_presets(presets: Sequence[str]) -> list[str]:
@@ -118,6 +131,31 @@ def canonicalize_cidr(value: str) -> str:
         raise click.ClickException(f"Invalid IP/CIDR: {value}") from exc
 
 
+def classify_target(value: str) -> tuple[str, str]:
+    """Return ``("cidr", cidr)`` or ``("host", hostname)`` for a rule entry."""
+    text = value.strip()
+    try:
+        return "cidr", canonicalize_cidr(text)
+    except click.ClickException:
+        pass
+    if is_valid_hostname_pattern(text):
+        return "host", text.lower().rstrip(".")
+    raise click.ClickException(f"Invalid IP/CIDR or hostname: {value}")
+
+
+def split_targets(entries: Sequence[str]) -> tuple[list[str], list[str]]:
+    cidrs: list[str] = []
+    hosts: list[str] = []
+    for entry in entries:
+        kind, value = classify_target(entry)
+        if kind == "cidr":
+            if value not in cidrs:
+                cidrs.append(value)
+        elif value not in hosts:
+            hosts.append(value)
+    return cidrs, hosts
+
+
 def parse_network_table(data: dict, *, where: str) -> NetworkConfig:
     if not isinstance(data, dict):
         raise click.ClickException(f"Invalid network {where}: expected a table")
@@ -139,7 +177,9 @@ def parse_network_table(data: dict, *, where: str) -> NetworkConfig:
     deny = data.get("deny", [])
     deny_presets = data.get("deny_presets", [])
     if not isinstance(allow, list) or not isinstance(deny, list):
-        raise click.ClickException(f"network.allow/deny {where} must be lists of IP/CIDR strings")
+        raise click.ClickException(
+            f"network.allow/deny {where} must be lists of IP/CIDR or hostname strings"
+        )
     if not isinstance(deny_presets, list):
         raise click.ClickException(f"network.deny_presets {where} must be a list of preset names")
 
@@ -196,9 +236,9 @@ def resolve_network(
         net.policy = policy
 
     if allow:
-        net.allow.extend(canonicalize_cidr(c) for c in allow)
+        net.allow.extend(allow)
     if deny:
-        net.deny.extend(canonicalize_cidr(c) for c in deny)
+        net.deny.extend(deny)
     if deny_presets:
         net.deny_presets.extend(deny_presets)
 
@@ -227,6 +267,18 @@ def resolv_conf_nameservers(path: Path | None = None) -> list[str]:
     return result
 
 
+def nameserver_ips(path: Path | None = None) -> list[str]:
+    """Bare nameserver addresses for DNS upstream forwarding."""
+    ips: list[str] = []
+    for cidr in resolv_conf_nameservers(path):
+        net = ipaddress.ip_network(cidr, strict=False)
+        if net.version == 4 and net.prefixlen == 32:
+            ips.append(str(net.network_address))
+        elif net.version == 6 and net.prefixlen == 128:
+            ips.append(str(net.network_address))
+    return ips
+
+
 def split_families(cidrs: Sequence[str]) -> tuple[list[str], list[str]]:
     v4: list[str] = []
     v6: list[str] = []
@@ -239,9 +291,16 @@ def split_families(cidrs: Sequence[str]) -> tuple[list[str], list[str]]:
     return v4, v6
 
 
-def build_nft_ruleset(net: NetworkConfig, *, extra_allow: Sequence[str] = ()) -> str:
+def build_nft_ruleset(
+    net: NetworkConfig,
+    *,
+    extra_allow: Sequence[str] = (),
+    dns_proxy: bool = False,
+) -> str:
     """Build an nftables ruleset for the sandbox netns."""
     allow = list(dict.fromkeys([*extra_allow, *net.allow]))
+    if dns_proxy:
+        allow = list(dict.fromkeys([*allow, "127.0.0.1/32"]))
     deny = list(dict.fromkeys(net.deny))
     allow4, allow6 = split_families(allow)
     deny4, deny6 = split_families(deny)
@@ -266,6 +325,14 @@ def build_nft_ruleset(net: NetworkConfig, *, extra_allow: Sequence[str] = ()) ->
         "    flags interval",
         *( [f"    elements = {{ {set_elements(allow6)} }}"] if allow6 else [] ),
         "  }",
+        "  set dyn_allow4 {",
+        "    type ipv4_addr",
+        "    flags timeout",
+        "  }",
+        "  set dyn_allow6 {",
+        "    type ipv6_addr",
+        "    flags timeout",
+        "  }",
         "  set deny4 {",
         "    type ipv4_addr",
         "    flags interval",
@@ -284,7 +351,18 @@ def build_nft_ruleset(net: NetworkConfig, *, extra_allow: Sequence[str] = ()) ->
         "    ip6 daddr @deny6 drop",
         "    ip daddr @allow4 accept",
         "    ip6 daddr @allow6 accept",
+        "    ip daddr @dyn_allow4 accept",
+        "    ip6 daddr @dyn_allow6 accept",
         "  }",
+    ]
+    if dns_proxy:
+        lines += [
+            "  chain dns_redirect {",
+            "    type nat hook output priority -100; policy accept;",
+            f"    meta l4proto udp udp dport 53 redirect to :{DNS_PROXY_PORT}",
+            "  }",
+        ]
+    lines += [
         "}",
     ]
     return "\n".join(lines) + "\n"
@@ -365,28 +443,48 @@ def start_slirp4netns(slirp_bin: str) -> subprocess.Popen:
     raise click.ClickException("timed out waiting for slirp4netns tap0")
 
 
-def drop_caps_and_exec(bwrap_args: list[str]) -> None:
-    """Replace the process with bwrap after dropping CAP_NET_ADMIN."""
+def spawn_bwrap_dropped(bwrap_args: list[str]) -> subprocess.Popen:
+    """Start bwrap after dropping CAP_NET_ADMIN in the child only."""
     cmd = [
         "setpriv",
         "--bounding-set=-net_admin",
         "--inh-caps=-net_admin",
         "--ambient-caps=-net_admin",
         "--",
-        *bwrap_args,
+        *with_share_net(bwrap_args),
     ]
-    log.debug("exec: %s", " ".join(cmd))
-    os.execvp(cmd[0], cmd)
+    log.debug("spawn: %s", " ".join(cmd))
+    return subprocess.Popen(cmd)
 
 
-def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp: bool) -> None:
-    """Apply filter rules in the current netns, drop caps, exec bwrap."""
+def preseed_host_allows(hosts: Sequence[str]) -> None:
+    """Resolve allowlisted hostnames once and seed dynamic nft sets."""
+    for host in hosts:
+        if host.startswith("*."):
+            continue
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except OSError as exc:
+            log.debug("preseed resolve %s failed: %s", host, exc)
+            continue
+        seen: set[str] = set()
+        for info in infos:
+            ip = info[4][0]
+            if ip in seen:
+                continue
+            seen.add(ip)
+            nft_add_allow_ip(ip, 300)
+
+
+def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp: bool) -> int:
+    """Apply filter rules in the current netns, run optional DNS proxy, spawn bwrap."""
     if not shutil.which("nft"):
         raise click.ClickException("network.mode=filter requires nft (nftables) on PATH")
     if not shutil.which("setpriv"):
         raise click.ClickException("network.mode=filter requires setpriv (util-linux) on PATH")
 
     slirp_proc = None
+    proxy: DnsProxy | None = None
     if start_slirp:
         slirp_bin = shutil.which("slirp4netns")
         if not slirp_bin:
@@ -395,14 +493,35 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp:
 
     try:
         extra_allow = resolv_conf_nameservers()
+        upstreams = nameserver_ips()
         if start_slirp:
             # slirp4netns built-in DNS
             extra_allow.append("10.0.2.3/32")
-        ruleset = build_nft_ruleset(net, extra_allow=extra_allow)
+            if "10.0.2.3" not in upstreams:
+                upstreams.append("10.0.2.3")
+        if not upstreams:
+            upstreams = ["1.1.1.1"]
+
+        use_proxy = net.needs_dns_proxy
+        ruleset = build_nft_ruleset(net, extra_allow=extra_allow, dns_proxy=use_proxy)
         log.debug("nft ruleset:\n%s", ruleset)
         apply_nft_ruleset(ruleset)
-        drop_caps_and_exec(with_share_net(bwrap_args))
+
+        if use_proxy:
+            preseed_host_allows(net.allow_hosts)
+            proxy = DnsProxy(
+                upstreams=upstreams,
+                allow_hosts=net.allow_hosts,
+                deny_hosts=net.deny_hosts,
+                add_allow_ip=nft_add_allow_ip,
+            )
+            proxy.start()
+
+        proc = spawn_bwrap_dropped(bwrap_args)
+        return proc.wait()
     finally:
+        if proxy is not None:
+            proxy.stop()
         if slirp_proc is not None and slirp_proc.poll() is None:
             slirp_proc.terminate()
 
@@ -430,6 +549,9 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
                     "policy": net.policy,
                     "allow": net.allow,
                     "deny": net.deny,
+                    "allow_hosts": net.allow_hosts,
+                    "deny_hosts": net.deny_hosts,
+                    "deny_presets": net.deny_presets,
                 }
             ),
             encoding="utf-8",

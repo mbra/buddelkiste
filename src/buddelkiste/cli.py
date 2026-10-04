@@ -26,9 +26,10 @@ Modes: host (default, share host network), none (no connectivity), filter
 allow/deny). Filter mode needs no root and no reserved host subnets.
 
 In filter mode, nameserver IPs from /etc/resolv.conf are auto-allowed so DNS
-keeps working under a default-deny policy. Rule addresses must be IP/CIDR
-literals. Named deny presets (private, linklocal, metadata) expand to common
-block ranges; see --list-net-presets.
+keeps working under a default-deny policy. Rules may be IP/CIDR literals or
+hostnames (exact or *.suffix); hostnames use a DNS proxy that publishes
+resolved A/AAAA addresses into dynamic nft sets. Named deny presets (private,
+linklocal, metadata) expand to common block ranges; see --list-net-presets.
 
 
 # Configuration
@@ -64,7 +65,7 @@ envvars: List of additional environment variables for the sandbox. The mandatory
   [network]
   mode = "filter"
   policy = "deny"
-  allow = ["1.1.1.1/32", "8.8.8.8/32"]
+  allow = ["1.1.1.1/32", "api.github.com", "*.pypi.org"]
   deny = ["203.0.113.0/24"]
   deny_presets = ["metadata", "linklocal"]
 
@@ -174,12 +175,12 @@ CONFIG_PATH = Path("~/.config/buddelkiste/config.toml")
 @click.option(
     "--net-allow",
     multiple=True,
-    help="Allow an IP/CIDR in filter mode (repeatable).",
+    help="Allow an IP/CIDR or hostname in filter mode (repeatable).",
 )
 @click.option(
     "--net-deny",
     multiple=True,
-    help="Deny an IP/CIDR in filter mode (repeatable).",
+    help="Deny an IP/CIDR or hostname in filter mode (repeatable).",
 )
 @click.option(
     "--net-deny-preset",
