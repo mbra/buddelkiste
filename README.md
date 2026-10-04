@@ -33,22 +33,201 @@ Wrapper options: `--debug`, `--feature` / `--no-feature`, `--list-features`,
 `--network`, `--net-policy`, `--net-allow`, `--net-deny`, `--net-deny-preset`,
 `--list-net-presets`. Everything else is the sandboxed command.
 
-Configuration (`~/.config/buddelkiste/config.toml`) can set a global feature list/table,
-per-executable overrides under `[executables.<name>]`, and `[network]` /
-`[executables.<name>.network]` for IP/CIDR and hostname filtering. Custom deny
-presets go under `[network.presets]`. Custom features go under `[feature.<name>]`
-with `env` allowlists and `binds` (paths may use `$VAR` / `${VAR}`; bind
-`mode` is `ro` (default), `rw`, `tmp-overlay`, `overlay`, or `overlay:<path>`).
-Installed
-packages can register features via the `buddelkiste.features` entry-point group.
-`--list-features` shows each feature's module path. See `bk --help`.
+## Features
 
-### Filter mode dependencies
+Optional permission sets are grouped by topic. Built-ins default to **on**.
+Toggle with CLI flags or config; see `bk --list-features` for the live catalog
+(including each feature's module path).
+
+| Feature | What it grants |
+|---------|----------------|
+| `asdf` | `~/.asdf`, `~/.tool-versions`, `ASDF_DIR` |
+| `cursor` | Cursor IDE/CLI install and state dirs |
+| `dbus` | session/system bus sockets, `DBUS_SESSION_BUS_ADDRESS` |
+| `docker` | `~/.docker`, Docker socket / `DOCKER_HOST` |
+| `git` | `~/.gitconfig`, `~/.config/git` |
+| `google` | `/opt/google` |
+| `gui` | display, GPU, audio, fonts, related env |
+| `java` | OpenJDK `/etc/java-*-openjdk` configs |
+| `locale` | `LANG`, `LC_NUMERIC`, `LC_TIME` |
+| `node` | npm/nvm/bun paths, `BUN_INSTALL` |
+| `nvim` | `~/nvim` |
+| `python` | pip/virtualenv paths and env |
+| `ssh` | `~/.ssh/config` plus a dedicated agent with `~/.ssh/sandbox_*` keys |
+| `term` | `TERM`, `TERMINFO`, `COLORTERM`, `TERM_PROGRAM`, `EDITOR` |
+| `user` | `~/.local` (ro), `~/.cache` (rw) |
+| `xdg-open` | host `xdg-open` via flatpak-xdg-utils |
+
+### CLI
+
+```bash
+bk --list-features
+
+# Tighten a desktop-ish run
+bk --no-feature gui --no-feature dbus --no-feature xdg-open curl https://example.com
+
+# Minimal toolchains for a script
+bk --no-feature cursor --no-feature google --feature python --feature git python app.py
+
+# Allowlist-style: disable broadly in config, then enable what you need
+bk --feature ssh --feature git git fetch
+```
+
+Precedence (later wins for CLI flags): feature defaults → global config
+`features` → per-executable `executables.<name>.features` →
+`--feature` / `--no-feature`.
+
+### Config
+
+Configuration is read from `~/.config/buddelkiste/config.toml`.
+
+```toml
+# Global allowlist (exactly these features), or use a table of overrides:
+# features = { gui = false, google = false }
+features = ["git", "ssh", "python", "rust", "term", "locale", "user"]
+
+[feature.rust]
+description = "Rust toolchain directories"
+default = false
+env = ["CARGO_HOME", "RUSTUP_HOME"]
+
+[[feature.rust.binds]]
+source = "$CARGO_HOME"
+mode = "rw"
+
+[[feature.rust.binds]]
+source = "${HOME}/.rustup"
+mode = "ro"
+
+[[feature.rust.binds]]
+source = "${HOME}/.cargo/registry"
+mode = "overlay"   # persistent upper under $XDG_CACHE_HOME/buddelkiste/overlays/<hash>
+
+[executables.cursor-agent]
+features = ["cursor", "git", "ssh", "gui", "dbus", "xdg-open", "term"]
+
+[executables.cursor-agent.network]
+mode = "filter"
+policy = "deny"
+allow = ["1.1.1.1/32", "api.github.com"]
+
+[executables.python]
+features = { python = true, git = true, gui = false }
+
+[[binds]]
+source = "/path/to/directory"
+mode = "ro"   # or "rw", "tmp-overlay", "overlay", "overlay:$XDG_CACHE_HOME/bk-upper"
+
+[[binds]]
+source = "${HOME}/scratch"
+target = "/mnt/scratch"
+mode = "tmp-overlay"   # writable in the sandbox; host tree unchanged
+
+[[envvars]]
+name = "MYENVVAR"
+value = "example value"   # omit value= to take it from the process environment
+
+[network]
+mode = "filter"
+policy = "deny"
+allow = ["1.1.1.1/32", "api.github.com", "*.pypi.org"]
+deny = ["203.0.113.0/24"]
+deny_presets = ["metadata", "linklocal", "corp"]
+
+[network.presets]
+corp = ["10.50.0.0/16", "*.internal.example.com"]
+```
+
+Bind `mode` values:
+
+| Mode | Meaning |
+|------|---------|
+| `ro` | read-only bind (default) |
+| `rw` | read-write bind |
+| `tmp-overlay` | overlayfs; writes are ephemeral |
+| `overlay` | overlayfs; upper under `$XDG_CACHE_HOME/buddelkiste/overlays/<sha256(source)>` |
+| `overlay:<path>` | overlayfs with an explicit upper path (`$VAR` / `${VAR}` / `~` ok) |
+
+Paths in `source`, `target`, and `overlay:<path>` may use `$VAR` / `${VAR}`.
+
+The current working directory must be visible inside the sandbox. If it is not
+covered by any bind, `bk` asks whether to whitelist it for this run or
+permanently (appends a `[[binds]]` entry). Non-interactively it errors instead.
+
+### Python features (entry points)
+
+Built-ins and third-party packages register features under the
+`buddelkiste.features` entry-point group. The entry point value must be a
+`Feature` instance, or a zero-argument callable that returns one. When loaded,
+`name` and `origin` are set from the entry-point name and value
+(e.g. `rust` / `mypkg.features:RUST`).
+
+`Feature` fields:
+
+| Field | Type | Default | Meaning |
+|-------|------|---------|---------|
+| `name` | `str` | *(required)* | Feature id used in CLI/config (`--feature`, `features = [...]`). Overwritten by the entry-point name at load time. |
+| `description` | `str` | *(required)* | One-line summary shown by `--list-features`. |
+| `default` | `bool` | `True` | Whether the feature is enabled before config/CLI overrides. |
+| `env_vars` | `tuple[str, ...]` | `()` | Host env var names to forward into the sandbox when the feature is on. |
+| `binds` | `Callable[[], list]` | `lambda: []` | Zero-arg callable returning bind objects (`ROBindConfig`, `RWBindConfig`, `DevBindConfig`, overlay configs, `Tmpfs`, or raw bwrap arg tuples). Called each run. |
+| `setup` | `Callable[[], AbstractContextManager[Sequence[str]]] \| None` | `None` | Optional factory returning a context manager. Entered while the sandbox runs; its yielded sequence is appended as extra bwrap args (binds, `--setenv`, …). Use for sockets/agents that need lifecycle. |
+| `origin` | `str` | `""` | Shown in `--list-features`. Overwritten by the entry-point value at load time (e.g. `mypkg.features:RUST`). |
+
+```python
+# mypkg/features.py
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from pathlib import Path
+
+from buddelkiste.binds import ROBindConfig, RWBindConfig
+from buddelkiste.features import Feature
+
+
+def rust_binds() -> list:
+    home = Path.home()
+    return [
+        RWBindConfig(home / ".cargo"),
+        ROBindConfig(home / ".rustup"),
+    ]
+
+
+@contextmanager
+def rust_setup() -> Iterator[Sequence[str]]:
+    # Optional: start helpers, yield extra bwrap args, clean up on exit.
+    # Built-in ssh uses this pattern for a dedicated ssh-agent.
+    yield []
+
+
+RUST = Feature(
+    name="rust",  # replaced by entry-point name "rust" when loaded
+    description="Rust toolchain directories",
+    default=False,
+    env_vars=("CARGO_HOME", "RUSTUP_HOME"),
+    binds=rust_binds,
+    setup=rust_setup,  # or omit / None
+    origin="mypkg.features:RUST",  # replaced by entry-point value when loaded
+)
+```
+
+```toml
+# pyproject.toml
+[project.entry-points."buddelkiste.features"]
+rust = "mypkg.features:RUST"
+```
+
+After install, `bk --list-features` shows the entry and its origin. Pure-TOML
+`[feature.<name>]` covers env/bind cases without a package; use Python entry
+points for custom bind logic or `setup` hooks. Config feature names must not
+collide with an existing entry point.
+
+## Network filter dependencies
 
 `network.mode = "filter"` needs **pasta** (from `passt`) or **slirp4netns**, plus
 **nft** and **setpriv**. No root and no reserved host subnets are required.
 Hostname rules start a DNS proxy that redirects UDP/53 and updates dynamic
-nftables allow sets from resolved A/AAAA records.
+nftables allow sets from resolved A/AAAA records. Nameserver IPs from
+`/etc/resolv.conf` are auto-allowed under a default-deny policy.
 
 ## Development
 
@@ -56,10 +235,9 @@ nftables allow sets from resolved A/AAAA records.
 uv sync
 uv run bk --help
 uv run pytest                 # unit + nested-safe integ + coverage; TUN e2e skipped if unavailable
-uv run pytest -m integration # real bwrap host/none + nested nft
+uv run pytest -m integration  # real bwrap host/none + nested nft
 uv run pytest -m requires_tun # filter/pasta e2e (needs /dev/net/tun)
 ```
-
 
 Integration layout:
 
