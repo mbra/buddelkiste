@@ -59,7 +59,12 @@ def test_filter_hostname_allow_via_dns_proxy(run_bk) -> None:
         "-c",
         "import socket; "
         "infos=socket.getaddrinfo('one.one.one.one', 443, type=socket.SOCK_STREAM); "
-        "socket.create_connection(infos[0][4], 5).close(); "
+        # sockaddr may be a 2-tuple (IPv4) or 4-tuple (IPv6); connect via the full info.
+        "info=infos[0]; "
+        "s=socket.socket(info[0], info[1], info[2]); "
+        "s.settimeout(5); "
+        "s.connect(info[4]); "
+        "s.close(); "
         "print('OK')",
     )
     assert proc.returncode == 0, proc.stderr or proc.stdout
