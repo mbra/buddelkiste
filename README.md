@@ -35,7 +35,9 @@ Wrapper options: `--debug`, `--feature` / `--no-feature`, `--list-features`,
 
 Configuration (`~/.config/buddelkiste/config.toml`) can set a global feature list/table,
 per-executable overrides under `[executables.<name>]`, and `[network]` /
-`[executables.<name>.network]` for IP/CIDR and hostname filtering. See `bk --help`.
+`[executables.<name>.network]` for IP/CIDR and hostname filtering. Custom deny
+presets go under `[network.presets]` and work with `deny_presets` /
+`--net-deny-preset`. See `bk --help`.
 
 ### Filter mode dependencies
 

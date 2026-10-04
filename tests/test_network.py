@@ -13,6 +13,7 @@ from buddelkiste.network import (
     canonicalize_cidr,
     expand_deny_presets,
     format_deny_presets_help,
+    load_deny_preset_registry,
     resolve_network,
     resolv_conf_nameservers,
     run_bwrap,
@@ -86,6 +87,50 @@ def test_format_deny_presets_help() -> None:
     text = format_deny_presets_help()
     for name in DENY_PRESETS:
         assert name in text
+
+
+def test_custom_network_presets() -> None:
+    config = {
+        "network": {
+            "mode": "filter",
+            "deny_presets": ["corp", "metadata"],
+            "presets": {
+                "corp": ["10.50.0.0/16", "*.internal.example.com", "10.50.0.0/16"],
+            },
+        }
+    }
+    registry = load_deny_preset_registry(config)
+    assert "corp" in registry
+    assert registry["corp"] == ("10.50.0.0/16", "*.internal.example.com")
+    assert " (custom)" in format_deny_presets_help(registry)
+
+    net = resolve_network(config)
+    assert "10.50.0.0/16" in net.deny
+    assert "*.internal.example.com" in net.deny_hosts
+    assert "169.254.169.254/32" in net.deny
+    assert "corp" in net.deny_presets
+
+
+def test_custom_network_presets_cli_append() -> None:
+    net = resolve_network(
+        {
+            "network": {
+                "presets": {"lab": ["203.0.113.0/24"]},
+            }
+        },
+        deny_presets=["lab"],
+    )
+    assert "203.0.113.0/24" in net.deny
+
+
+def test_custom_network_preset_rejects_builtin_name() -> None:
+    with pytest.raises(click.ClickException, match="conflicts with built-in"):
+        load_deny_preset_registry({"network": {"presets": {"private": ["1.1.1.1/32"]}}})
+
+
+def test_custom_network_preset_rejects_bad_target() -> None:
+    with pytest.raises(click.ClickException, match="Invalid IP/CIDR or hostname"):
+        load_deny_preset_registry({"network": {"presets": {"bad": ["not a host!!"]}}})
 
 
 def test_resolve_network_global_and_cli() -> None:
@@ -231,5 +276,6 @@ def test_run_bwrap_filter_launches_pasta(monkeypatch: pytest.MonkeyPatch) -> Non
     assert code == 0
     assert captured["args"][0] == "/usr/bin/pasta"
     assert "--config-net" in captured["args"]
-    assert "-m" in captured["args"]
+    assert "--map-host-loopback" in captured["args"]
+    assert "none" in captured["args"]
     assert "buddelkiste.network_inner" in captured["args"]

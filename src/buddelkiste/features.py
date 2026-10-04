@@ -142,6 +142,8 @@ def docker_binds() -> list:
         runtime = env("XDG_RUNTIME_DIR")
         if runtime and docker_host.startswith(runtime):
             res.append(ROBindConfig(docker_host))
+    else:
+        res.append(ROBindConfig("/var/run/docker.sock"))
     return res
 
 

@@ -71,11 +71,15 @@ class NetworkConfig:
     allow_hosts: list[str] = field(default_factory=list)
     deny_hosts: list[str] = field(default_factory=list)
 
-    def normalized(self) -> NetworkConfig:
-        presets = validate_deny_presets(self.deny_presets)
+    def normalized(
+        self, registry: dict[str, tuple[str, ...]] | None = None
+    ) -> NetworkConfig:
+        presets_registry = registry if registry is not None else DENY_PRESETS
+        presets = validate_deny_presets(self.deny_presets, registry=presets_registry)
         allow_cidrs, allow_hosts = split_targets(self.allow)
-        deny_cidrs, deny_hosts = split_targets(self.deny)
-        deny_cidrs = list(dict.fromkeys([*deny_cidrs, *expand_deny_presets(presets)]))
+        deny_cidrs, deny_hosts = split_targets(
+            [*self.deny, *expand_deny_presets(presets, registry=presets_registry)]
+        )
         allow_hosts = list(dict.fromkeys([*allow_hosts, *self.allow_hosts]))
         deny_hosts = list(dict.fromkeys([*deny_hosts, *self.deny_hosts]))
         return NetworkConfig(
@@ -93,11 +97,52 @@ class NetworkConfig:
         return bool(self.allow_hosts or self.deny_hosts)
 
 
-def validate_deny_presets(presets: Sequence[str]) -> list[str]:
+def load_deny_preset_registry(config: dict) -> dict[str, tuple[str, ...]]:
+    """Built-in deny presets plus optional ``[network.presets]`` from config."""
+    registry: dict[str, tuple[str, ...]] = dict(DENY_PRESETS)
+    network = config.get("network")
+    if network is None:
+        return registry
+    if not isinstance(network, dict):
+        raise click.ClickException("Invalid network in config: expected a table")
+
+    custom = network.get("presets")
+    if custom is None:
+        return registry
+    if not isinstance(custom, dict):
+        raise click.ClickException(
+            "network.presets must be a table of name = [IP/CIDR or hostname, ...]"
+        )
+
+    for name, entries in custom.items():
+        key = str(name)
+        if key in DENY_PRESETS:
+            raise click.ClickException(
+                f"network.presets.{key} conflicts with built-in preset {key!r}"
+            )
+        if not isinstance(entries, list):
+            raise click.ClickException(
+                f"network.presets.{key} must be a list of IP/CIDR or hostname strings"
+            )
+        targets: list[str] = []
+        for entry in entries:
+            _kind, value = classify_target(str(entry))
+            if value not in targets:
+                targets.append(value)
+        registry[key] = tuple(targets)
+    return registry
+
+
+def validate_deny_presets(
+    presets: Sequence[str],
+    *,
+    registry: dict[str, tuple[str, ...]] | None = None,
+) -> list[str]:
+    presets_registry = registry if registry is not None else DENY_PRESETS
     result: list[str] = []
     for name in presets:
-        if name not in DENY_PRESETS:
-            known = ", ".join(DENY_PRESETS)
+        if name not in presets_registry:
+            known = ", ".join(presets_registry)
             raise click.ClickException(
                 f"Unknown network deny preset: {name!r} (expected {known})"
             )
@@ -106,17 +151,27 @@ def validate_deny_presets(presets: Sequence[str]) -> list[str]:
     return result
 
 
-def expand_deny_presets(presets: Sequence[str]) -> list[str]:
-    cidrs: list[str] = []
-    for name in validate_deny_presets(presets):
-        cidrs.extend(DENY_PRESETS[name])
-    return cidrs
+def expand_deny_presets(
+    presets: Sequence[str],
+    *,
+    registry: dict[str, tuple[str, ...]] | None = None,
+) -> list[str]:
+    presets_registry = registry if registry is not None else DENY_PRESETS
+    targets: list[str] = []
+    for name in validate_deny_presets(presets, registry=presets_registry):
+        targets.extend(presets_registry[name])
+    return targets
 
 
-def format_deny_presets_help() -> str:
+def format_deny_presets_help(
+    registry: dict[str, tuple[str, ...]] | None = None,
+) -> str:
+    presets_registry = registry if registry is not None else DENY_PRESETS
     lines = ["Available network deny presets:", ""]
-    for name, cidrs in DENY_PRESETS.items():
-        lines.append(f"  {name:10} {', '.join(cidrs)}")
+    for name, targets in presets_registry.items():
+        suffix = "" if name in DENY_PRESETS else " (custom)"
+        body = ", ".join(targets) if targets else "(empty)"
+        lines.append(f"  {name:10} {body}{suffix}")
     return "\n".join(lines)
 
 
@@ -156,7 +211,12 @@ def split_targets(entries: Sequence[str]) -> tuple[list[str], list[str]]:
     return cidrs, hosts
 
 
-def parse_network_table(data: dict, *, where: str) -> NetworkConfig:
+def parse_network_table(
+    data: dict,
+    *,
+    where: str,
+    registry: dict[str, tuple[str, ...]] | None = None,
+) -> NetworkConfig:
     if not isinstance(data, dict):
         raise click.ClickException(f"Invalid network {where}: expected a table")
 
@@ -190,7 +250,7 @@ def parse_network_table(data: dict, *, where: str) -> NetworkConfig:
         deny=[str(x) for x in deny],
         deny_presets=[str(x) for x in deny_presets],
     )
-    return cfg.normalized()
+    return cfg.normalized(registry)
 
 
 def resolve_network(
@@ -208,16 +268,21 @@ def resolve_network(
     Precedence: defaults → global [network] → per-executable network → CLI flags.
     CLI ``--net-allow`` / ``--net-deny`` / ``--net-deny-preset`` append to the
     lists; ``--network`` / ``--net-policy`` override mode/policy when given.
+
+    Custom named deny presets may be defined under ``[network.presets]`` as
+    ``name = ["IP/CIDR or hostname", ...]`` and referenced like built-ins.
     """
+    registry = load_deny_preset_registry(config)
     net = NetworkConfig()
     if "network" in config:
-        net = parse_network_table(config["network"], where="in config")
+        net = parse_network_table(config["network"], where="in config", registry=registry)
 
     exec_cfg = lookup_executable_config(config, executable)
     if exec_cfg is not None and "network" in exec_cfg:
         net = parse_network_table(
             exec_cfg["network"],
             where=f"for executable {executable!r}",
+            registry=registry,
         )
 
     if mode is not None:
@@ -242,7 +307,7 @@ def resolve_network(
     if deny_presets:
         net.deny_presets.extend(deny_presets)
 
-    return net.normalized()
+    return net.normalized(registry)
 
 
 def resolv_conf_nameservers(path: Path | None = None) -> list[str]:
@@ -570,7 +635,9 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
             cmd = [
                 helper,
                 "--config-net",
-                "--disable-host-loopback",
+                # Newer pasta replaced --disable-host-loopback with this.
+                "--map-host-loopback",
+                "none",
                 "--",
                 *inner,
             ]

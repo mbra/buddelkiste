@@ -29,7 +29,8 @@ In filter mode, nameserver IPs from /etc/resolv.conf are auto-allowed so DNS
 keeps working under a default-deny policy. Rules may be IP/CIDR literals or
 hostnames (exact or *.suffix); hostnames use a DNS proxy that publishes
 resolved A/AAAA addresses into dynamic nft sets. Named deny presets (private,
-linklocal, metadata) expand to common block ranges; see --list-net-presets.
+linklocal, metadata, plus custom names under [network.presets]) expand to
+IP/CIDR or hostname denials; see --list-net-presets.
 
 
 # Configuration
@@ -44,7 +45,8 @@ executables: Table keyed by executable path or basename. Each entry may contain
 a features list or table, and/or a network table, applied when that executable
 is started.
 
-network: Global network settings (mode, policy, allow, deny). See example.
+network: Global network settings (mode, policy, allow, deny, deny_presets).
+Optional [network.presets] defines custom named deny lists. See example.
 
 binds: List of additional bind mounts for the sandbox with "source", "target"
 and "read_only" keys. The "source" key is mandatory and gives the host directory
@@ -62,28 +64,38 @@ envvars: List of additional environment variables for the sandbox. The mandatory
   # Global allowlist (exactly these features)
   features = ["git", "ssh", "python"]
 
+\b
   [network]
   mode = "filter"
   policy = "deny"
   allow = ["1.1.1.1/32", "api.github.com", "*.pypi.org"]
   deny = ["203.0.113.0/24"]
-  deny_presets = ["metadata", "linklocal"]
+  deny_presets = ["metadata", "linklocal", "corp"]
 
+\b
+  [network.presets]
+  corp = ["10.50.0.0/16", "*.internal.example.com"]
+
+\b
   [executables.cursor-agent]
   features = ["cursor", "git", "ssh", "gui"]
 
+\b
   [executables.cursor-agent.network]
   mode = "filter"
   policy = "deny"
   allow = ["1.1.1.1/32"]
 
+\b
   [executables.python]
   features = ["python", "git"]
 
+\b
   [[binds]]
   source = "/path/to/directory"  # path is whitelisted for the sandbox
   read_only = true  # change to false to give the sandbox write access
 
+\b
   [[envvars]]
   name = "MYENVVAR"
   value = "example value"  # delete this line to use the value from the environment
@@ -120,7 +132,12 @@ from buddelkiste.features import (
     format_features_help,
     resolve_features,
 )
-from buddelkiste.network import format_deny_presets_help, resolve_network, run_bwrap
+from buddelkiste.network import (
+    format_deny_presets_help,
+    load_deny_preset_registry,
+    resolve_network,
+    run_bwrap,
+)
 
 env = os.getenv
 
@@ -185,13 +202,13 @@ CONFIG_PATH = Path("~/.config/buddelkiste/config.toml")
 @click.option(
     "--net-deny-preset",
     multiple=True,
-    help="Deny a named preset (private, linklocal, metadata). Repeatable.",
+    help="Deny a named preset (built-in or from [network.presets]). Repeatable.",
 )
 @click.option(
     "--list-net-presets",
     is_flag=True,
     default=False,
-    help="List network deny presets and exit",
+    help="List built-in and config network deny presets and exit",
 )
 @click.argument(
     "args",
@@ -217,11 +234,11 @@ def cli(
         click.echo(format_features_help())
         raise SystemExit(0)
 
-    if list_net_presets or args == ["--list-net-presets"]:
-        click.echo(format_deny_presets_help())
-        raise SystemExit(0)
-
     config = load_config()
+
+    if list_net_presets or args == ["--list-net-presets"]:
+        click.echo(format_deny_presets_help(load_deny_preset_registry(config)))
+        raise SystemExit(0)
     command = resolve_launch_command(args)
     executable = command_executable(command, args)
     enabled = resolve_features(
