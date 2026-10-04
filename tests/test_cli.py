@@ -50,6 +50,28 @@ def test_cli_runs_bwrap_with_command(
     assert "SSH_AUTH_SOCK" not in fake_bwrap["args"]
 
 
+def test_cli_hides_project_config(
+    prepared_cwd: Path,
+    fake_bwrap,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from buddelkiste.cli import PROJECT_CONFIG_NAME
+
+    project = prepared_cwd / PROJECT_CONFIG_NAME
+    project.write_text("features = []\n", encoding="utf-8")
+    monkeypatch.chdir(prepared_cwd)
+
+    result = CliRunner().invoke(cli, ["run", "--no-feature", "ssh", "/bin/true"])
+    assert result.exit_code == 0, result.output
+    args = fake_bwrap["args"]
+    targets = [
+        args[i + 2]
+        for i, arg in enumerate(args)
+        if arg == "--ro-bind" and i + 2 < len(args)
+    ]
+    assert str(project.resolve()) in targets
+
+
 def test_cli_shell_fallback_when_no_args(
     prepared_cwd: Path,
     fake_bwrap,

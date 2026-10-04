@@ -85,7 +85,10 @@ Precedence (later wins for CLI flags): feature defaults → global config
 
 ### Config
 
-Configuration is read from `~/.config/buddelkiste/config.toml`.
+Configuration is read from `~/.config/buddelkiste/config.toml`, then merged with
+`.buddelkiste.toml` from the current directory or an ancestor (project values
+win). The project file is masked inside the sandbox (empty file bound over the
+path) so the sandboxed command cannot read it.
 
 ```toml
 # Global allowlist (exactly these features), or use a table of overrides:

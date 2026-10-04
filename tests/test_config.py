@@ -7,22 +7,32 @@ import click
 import pytest
 
 from buddelkiste.cli import (
+    PROJECT_CONFIG_NAME,
     ROBindConfig,
     RWBindConfig,
     add_bind_to_config,
     ensure_cwd_in_sandbox,
+    find_project_config,
     get_binds,
     get_env_args,
     load_config,
+    merge_config,
+    project_config_hide_args,
 )
 from buddelkiste.features import FEATURE_NAMES
 
 
-def test_load_config_missing_returns_empty(tmp_config: Path) -> None:
+def test_load_config_missing_returns_empty(
+    tmp_config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
     assert load_config() == {}
 
 
-def test_load_config_reads_toml(tmp_config: Path) -> None:
+def test_load_config_reads_toml(
+    tmp_config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
     tmp_config.write_text(
         '[[binds]]\nsource = "/tmp"\nmode = "rw"\n\n'
         '[[envvars]]\nname = "FOO"\nvalue = "bar"\n',
@@ -32,6 +42,97 @@ def test_load_config_reads_toml(tmp_config: Path) -> None:
     assert config["binds"][0]["source"] == "/tmp"
     assert config["binds"][0]["mode"] == "rw"
     assert config["envvars"][0] == {"name": "FOO", "value": "bar"}
+
+
+def test_find_project_config_walks_ancestors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    nested = root / "pkg" / "sub"
+    nested.mkdir(parents=True)
+    project = root / PROJECT_CONFIG_NAME
+    project.write_text("features = []\n", encoding="utf-8")
+    monkeypatch.chdir(nested)
+    assert find_project_config() == project.resolve()
+
+
+def test_merge_config_concatenates_lists_and_overrides_features() -> None:
+    base = {
+        "features": ["git"],
+        "binds": [{"source": "/a", "mode": "ro"}],
+        "envvars": [{"name": "A"}],
+        "network": {
+            "mode": "host",
+            "presets": {"corp": ["10.0.0.0/8"]},
+        },
+        "feature": {"rust": {"env": ["CARGO_HOME"]}},
+        "executables": {
+            "python": {"features": ["python"], "network": {"mode": "none"}},
+        },
+    }
+    overlay = {
+        "features": {"gui": False},
+        "binds": [{"source": "/b", "mode": "rw"}],
+        "envvars": [{"name": "B"}],
+        "network": {
+            "mode": "filter",
+            "presets": {"labs": ["10.1.0.0/16"]},
+        },
+        "feature": {"go": {"env": ["GOPATH"]}},
+        "executables": {
+            "python": {"network": {"allow": ["1.1.1.1/32"]}},
+        },
+    }
+    merged = merge_config(base, overlay)
+    assert merged["features"] == {"gui": False}
+    assert merged["binds"] == [
+        {"source": "/a", "mode": "ro"},
+        {"source": "/b", "mode": "rw"},
+    ]
+    assert merged["envvars"] == [{"name": "A"}, {"name": "B"}]
+    assert merged["network"]["mode"] == "filter"
+    assert merged["network"]["presets"] == {
+        "corp": ["10.0.0.0/8"],
+        "labs": ["10.1.0.0/16"],
+    }
+    assert set(merged["feature"]) == {"rust", "go"}
+    assert merged["executables"]["python"]["features"] == ["python"]
+    assert merged["executables"]["python"]["network"] == {
+        "mode": "none",
+        "allow": ["1.1.1.1/32"],
+    }
+
+
+def test_load_config_merges_project_over_user(
+    tmp_config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    tmp_config.write_text(
+        'features = ["git"]\n[[binds]]\nsource = "/user"\nmode = "ro"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / PROJECT_CONFIG_NAME).write_text(
+        'features = ["python"]\n[[binds]]\nsource = "/project"\nmode = "rw"\n',
+        encoding="utf-8",
+    )
+    config = load_config()
+    assert config["features"] == ["python"]
+    assert config["binds"] == [
+        {"source": "/user", "mode": "ro"},
+        {"source": "/project", "mode": "rw"},
+    ]
+
+
+def test_project_config_hide_args(tmp_path: Path) -> None:
+    path = tmp_path / PROJECT_CONFIG_NAME
+    path.write_text("features = []\n", encoding="utf-8")
+    with project_config_hide_args(None) as args:
+        assert args == []
+    with project_config_hide_args(path) as args:
+        assert args[0] == "--ro-bind"
+        assert Path(args[1]).is_file()
+        assert Path(args[1]).read_bytes() == b""
+        assert args[2] == str(path.resolve())
 
 
 def test_add_bind_to_config_creates_file(tmp_config: Path, tmp_path: Path) -> None:

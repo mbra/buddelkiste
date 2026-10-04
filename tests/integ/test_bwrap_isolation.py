@@ -66,3 +66,39 @@ def test_optional_features_disabled_by_empty_list(run_bk) -> None:
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "UNSET"
+
+
+def test_project_config_is_hidden_inside_sandbox(
+    run_bk, integ_workspace: dict[str, Path]
+) -> None:
+    from buddelkiste.cli import PROJECT_CONFIG_NAME
+
+    project = integ_workspace["work"] / PROJECT_CONFIG_NAME
+    project.write_text(
+        'features = []\n[[envvars]]\nname = "FROM_PROJECT"\nvalue = "yes"\n',
+        encoding="utf-8",
+    )
+    # Host file remains readable; sandbox sees /dev/null over the same path.
+    assert "FROM_PROJECT" in project.read_text(encoding="utf-8")
+
+    env_proc = run_bk(
+        "--network",
+        "none",
+        "--",
+        "/bin/sh",
+        "-c",
+        'printf "%s" "${FROM_PROJECT-UNSET}"',
+    )
+    assert env_proc.returncode == 0, env_proc.stderr
+    assert env_proc.stdout == "yes"
+
+    hide_proc = run_bk(
+        "--network",
+        "none",
+        "--",
+        "/bin/sh",
+        "-c",
+        f"wc -c < '{project}'",
+    )
+    assert hide_proc.returncode == 0, hide_proc.stderr
+    assert hide_proc.stdout.strip() == "0"

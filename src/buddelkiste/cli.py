@@ -7,8 +7,10 @@ import logging
 import os
 import pwd
 import sys
+import tempfile
 import tomllib
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 
 import click
@@ -54,8 +56,11 @@ IP/CIDR or hostname denials; see `bk list-net-presets`.
 
 # Configuration
 
-Additional configuration is read from ~/.config/buddelkiste/config.toml. The file
-supports the following top-level keys:
+Configuration is read from ~/.config/buddelkiste/config.toml, then merged with
+a project file `.buddelkiste.toml` found in the current directory or an ancestor
+(project values win). The project file is masked inside the sandbox (empty file
+over the path) so the command cannot read it. The files support the following
+top-level keys:
 
 features: Global feature selection. Either a list of feature names (allowlist)
 or a table of feature name = true/false overrides.
@@ -173,6 +178,7 @@ from buddelkiste.network import (
 env = os.getenv
 
 CONFIG_PATH = Path("~/.config/buddelkiste/config.toml")
+PROJECT_CONFIG_NAME = ".buddelkiste.toml"
 
 
 @click.group(help=__doc__)
@@ -256,6 +262,7 @@ def run(
     logging.basicConfig(level="DEBUG" if debug else "WARNING")
 
     config = load_config()
+    project_config = find_project_config()
     command = resolve_launch_command(args)
     executable = command_executable(command, args)
     enabled = resolve_features(
@@ -280,7 +287,10 @@ def run(
 
     bind_args = get_bind_args(binds)
 
-    with feature_setup(enabled, config) as setup_args:
+    with (
+        feature_setup(enabled, config) as setup_args,
+        project_config_hide_args(project_config) as hide_args,
+    ):
         bwrap_args = [
             "bwrap",
             "--unshare-all",
@@ -289,6 +299,7 @@ def run(
             "--chdir",
             str(Path.cwd()),
             *bind_args,
+            *hide_args,
             *env_args,
             *setup_args,
             "--",
@@ -317,13 +328,114 @@ def list_net_presets() -> None:
     click.echo(format_deny_presets_help(load_deny_preset_registry(load_config())))
 
 
-def load_config():
-    try:
-        fobj = config_path().open("rb")
-    except FileNotFoundError:
-        return {}
-    with fobj:
-        return tomllib.load(fobj)
+def load_toml_file(path: Path) -> dict:
+    with path.open("rb") as fobj:
+        data = tomllib.load(fobj)
+    if not isinstance(data, dict):
+        raise click.ClickException(f"Config {path} must be a TOML table")
+    return data
+
+
+def find_project_config(start: Path | None = None) -> Path | None:
+    """Return `.buddelkiste.toml` in ``start`` or an ancestor, if present."""
+    cur = (start or Path.cwd()).resolve()
+    for directory in (cur, *cur.parents):
+        candidate = directory / PROJECT_CONFIG_NAME
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _merge_network(base: dict, overlay: dict) -> dict:
+    merged = dict(base)
+    for key, value in overlay.items():
+        if (
+            key == "presets"
+            and isinstance(value, dict)
+            and isinstance(merged.get("presets"), dict)
+        ):
+            merged["presets"] = {**merged["presets"], **value}
+        else:
+            merged[key] = value
+    return merged
+
+
+def _merge_executables(base: dict, overlay: dict) -> dict:
+    merged = dict(base)
+    for name, data in overlay.items():
+        existing = merged.get(name)
+        if isinstance(data, dict) and isinstance(existing, dict):
+            entry = dict(existing)
+            for key, value in data.items():
+                if (
+                    key == "network"
+                    and isinstance(value, dict)
+                    and isinstance(entry.get("network"), dict)
+                ):
+                    entry["network"] = _merge_network(entry["network"], value)
+                else:
+                    entry[key] = value
+            merged[name] = entry
+        else:
+            merged[name] = data
+    return merged
+
+
+def merge_config(base: dict, overlay: dict) -> dict:
+    """Merge project config over user config.
+
+    ``binds`` / ``envvars`` lists are concatenated. Nested ``feature``,
+    ``executables``, and ``network`` tables are merged (project wins on
+    conflicts). Other keys are replaced by the overlay value.
+    """
+    result = dict(base)
+    for key, value in overlay.items():
+        if key in {"binds", "envvars"} and isinstance(value, list):
+            result[key] = [*result.get(key, []), *value]
+        elif key == "feature" and isinstance(value, dict):
+            merged = dict(result.get("feature") or {})
+            merged.update(value)
+            result["feature"] = merged
+        elif key == "executables" and isinstance(value, dict):
+            existing = result.get("executables")
+            result["executables"] = (
+                _merge_executables(existing, value)
+                if isinstance(existing, dict)
+                else value
+            )
+        elif key == "network" and isinstance(value, dict):
+            existing = result.get("network")
+            result["network"] = (
+                _merge_network(existing, value) if isinstance(existing, dict) else value
+            )
+        else:
+            result[key] = value
+    return result
+
+
+@contextmanager
+def project_config_hide_args(
+    project_config: Path | None,
+) -> Iterator[list[str]]:
+    """Yield bwrap args that mask the project config with an empty file."""
+    if project_config is None:
+        yield []
+        return
+    # Prefer an empty regular file over /dev/null: in a user namespace,
+    # binding the null device often yields an unreadable character device.
+    with tempfile.NamedTemporaryFile(prefix="bk-mask-", suffix=".toml") as mask:
+        yield ["--ro-bind", mask.name, str(project_config.resolve())]
+
+
+def load_config() -> dict:
+    config: dict = {}
+    user_path = config_path()
+    if user_path.is_file():
+        config = load_toml_file(user_path)
+    project_path = find_project_config()
+    if project_path is not None:
+        config = merge_config(config, load_toml_file(project_path))
+    return config
 
 
 def get_binds(config: dict, enabled: dict[str, bool] | None = None) -> list:
@@ -483,6 +595,7 @@ __all__ = [
     "bind_config",
     "cli",
     "ensure_cwd_in_sandbox",
+    "find_project_config",
     "find_sandbox_ssh_key",
     "get_bind_args",
     "get_binds",
@@ -490,6 +603,8 @@ __all__ = [
     "list_features",
     "list_net_presets",
     "load_config",
+    "merge_config",
+    "project_config_hide_args",
     "resolve_features",
     "resolve_launch_command",
     "resolve_network",
