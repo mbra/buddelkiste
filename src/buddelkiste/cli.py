@@ -1,8 +1,8 @@
 """Sandbox a command using bubblewrap.
 
 Pass the executable and its arguments on the command line. They are run inside
-a bubblewrap sandbox. Wrapper options are --debug and feature toggles; everything
-else is forwarded as the sandboxed command.
+a bubblewrap sandbox. Wrapper options are --debug, feature toggles, and network
+controls; everything else is forwarded as the sandboxed command.
 
 With no command, a login shell is started inside the sandbox so the environment
 can be inspected.
@@ -19,6 +19,17 @@ basename of the command being started). A list selects exactly those features;
 a table applies true/false overrides.
 
 
+# Network
+
+Modes: host (default, share host network), none (no connectivity), filter
+(private netns via pasta or slirp4netns with in-namespace nftables IP/CIDR
+allow/deny). Filter mode needs no root and no reserved host subnets.
+
+In filter mode, nameserver IPs from /etc/resolv.conf are auto-allowed so DNS
+keeps working under a default-deny policy. Rule addresses must be IP/CIDR
+literals.
+
+
 # Configuration
 
 Additional configuration is read from ~/.config/buddelkiste/config.toml. The file
@@ -28,7 +39,10 @@ features: Global feature selection. Either a list of feature names (allowlist)
 or a table of feature name = true/false overrides.
 
 executables: Table keyed by executable path or basename. Each entry may contain
-a features list or table applied when that executable is started.
+a features list or table, and/or a network table, applied when that executable
+is started.
+
+network: Global network settings (mode, policy, allow, deny). See example.
 
 binds: List of additional bind mounts for the sandbox with "source", "target"
 and "read_only" keys. The "source" key is mandatory and gives the host directory
@@ -46,13 +60,19 @@ envvars: List of additional environment variables for the sandbox. The mandatory
   # Global allowlist (exactly these features)
   features = ["git", "ssh", "python"]
 
-  # Or global overrides on the defaults:
-  # [features]
-  # gui = false
-  # google = false
+  [network]
+  mode = "filter"
+  policy = "deny"
+  allow = ["1.1.1.1/32", "8.8.8.8/32"]
+  deny = ["169.254.169.254/32"]
 
   [executables.cursor-agent]
   features = ["cursor", "git", "ssh", "gui"]
+
+  [executables.cursor-agent.network]
+  mode = "filter"
+  policy = "deny"
+  allow = ["1.1.1.1/32"]
 
   [executables.python]
   features = ["python", "git"]
@@ -81,7 +101,6 @@ import json
 import logging
 import os
 import pwd
-import subprocess
 import sys
 import tomllib
 from collections.abc import Sequence
@@ -98,6 +117,7 @@ from buddelkiste.features import (
     format_features_help,
     resolve_features,
 )
+from buddelkiste.network import resolve_network, run_bwrap
 
 env = os.getenv
 
@@ -136,6 +156,29 @@ CONFIG_PATH = Path("~/.config/buddelkiste/config.toml")
     default=False,
     help="List available features and exit",
 )
+@click.option(
+    "--network",
+    "network_mode",
+    type=click.Choice(["host", "none", "filter"], case_sensitive=False),
+    default=None,
+    help="Network mode: host (default), none, or filter.",
+)
+@click.option(
+    "--net-policy",
+    type=click.Choice(["allow", "deny"], case_sensitive=False),
+    default=None,
+    help="Default verdict for filter mode (allow or deny).",
+)
+@click.option(
+    "--net-allow",
+    multiple=True,
+    help="Allow an IP/CIDR in filter mode (repeatable).",
+)
+@click.option(
+    "--net-deny",
+    multiple=True,
+    help="Deny an IP/CIDR in filter mode (repeatable).",
+)
 @click.argument(
     "args",
     nargs=-1,
@@ -146,6 +189,10 @@ def cli(
     enable_features: tuple[str, ...],
     disable_features: tuple[str, ...],
     list_features: bool,
+    network_mode: str | None,
+    net_policy: str | None,
+    net_allow: tuple[str, ...],
+    net_deny: tuple[str, ...],
     args: list[str],
 ) -> None:
     logging.basicConfig(level="DEBUG" if debug else "WARNING")
@@ -163,6 +210,14 @@ def cli(
         enable=enable_features,
         disable=disable_features,
     )
+    net = resolve_network(
+        config,
+        executable=executable,
+        mode=network_mode,
+        policy=net_policy,
+        allow=net_allow,
+        deny=net_deny,
+    )
     binds = get_binds(config, enabled)
     env_args = get_env_args(config, enabled)
 
@@ -175,7 +230,6 @@ def cli(
             "bwrap",
             "--unshare-all",
             "--clearenv",
-            "--share-net",
             "--die-with-parent",
             "--chdir",
             str(Path.cwd()),
@@ -188,8 +242,10 @@ def cli(
 
         if debug:
             log_cmdline(bwrap_args)
+            logging.debug("network mode=%s policy=%s allow=%s deny=%s",
+                          net.mode, net.policy, net.allow, net.deny)
 
-        exit_code = subprocess.run(bwrap_args, check=False).returncode
+        exit_code = run_bwrap(bwrap_args, net)
 
     sys.exit(exit_code)
 
@@ -366,4 +422,5 @@ __all__ = [
     "load_config",
     "resolve_features",
     "resolve_launch_command",
+    "resolve_network",
 ]

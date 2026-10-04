@@ -15,13 +15,28 @@ bk
 bk --list-features
 bk --no-feature gui --no-feature google cursor-agent
 bk --feature python --feature ssh python myscript.py
+
+# Network modes
+bk --network host …                 # share host network (default)
+bk --network none …                 # no connectivity
+bk --network filter \
+  --net-policy deny \
+  --net-allow 1.1.1.1/32 \
+  --net-deny 169.254.169.254/32 …
 ```
 
-Wrapper options: `--debug`, `--feature` / `--no-feature`, `--list-features`.
+Wrapper options: `--debug`, `--feature` / `--no-feature`, `--list-features`,
+`--network`, `--net-policy`, `--net-allow`, `--net-deny`.
 Everything else is the sandboxed command.
 
-Configuration (`~/.config/buddelkiste/config.toml`) can set a global feature list/table
-and per-executable overrides under `[executables.<name>]`. See `bk --help`.
+Configuration (`~/.config/buddelkiste/config.toml`) can set a global feature list/table,
+per-executable overrides under `[executables.<name>]`, and `[network]` /
+`[executables.<name>.network]` for IP/CIDR filtering. See `bk --help`.
+
+### Filter mode dependencies
+
+`network.mode = "filter"` needs **pasta** (from `passt`) or **slirp4netns**, plus
+**nft** and **setpriv**. No root and no reserved host subnets are required.
 
 ## Development
 
