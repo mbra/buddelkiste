@@ -238,7 +238,7 @@ nftables allow sets from resolved A/AAAA records. Nameserver IPs from
 ## Development
 
 ```bash
-uv sync
+uv sync --group dev
 uv run bk --help
 uv run pytest                 # unit + nested-safe integ + coverage; TUN e2e skipped if unavailable
 uv run pytest -m integration  # real bwrap host/none + nested nft
