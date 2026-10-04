@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import socket
 import struct
+import threading
 
 from buddelkiste.dns_proxy import (
     extract_answer_ips,
     extract_query,
+    forward_query,
     host_matches,
     is_valid_hostname_pattern,
     nxdomain_response,
@@ -64,3 +67,47 @@ def test_extract_answer_ips() -> None:
     ips, ttl = extract_answer_ips(resp)
     assert ips == ["93.184.216.34"]
     assert ttl == 90
+
+
+def test_forward_query_uses_dns_over_tcp(monkeypatch) -> None:
+    query = _query("example.com")
+    response = _response_with_a("example.com", "93.184.216.34")
+    errors: list[str] = []
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        port = srv.getsockname()[1]
+        srv.listen(1)
+
+        def accept_once() -> None:
+            conn, _addr = srv.accept()
+            with conn:
+                header = conn.recv(2)
+                (length,) = struct.unpack("!H", header)
+                body = b""
+                while len(body) < length:
+                    chunk = conn.recv(length - len(body))
+                    if not chunk:
+                        break
+                    body += chunk
+                if body != query:
+                    errors.append(f"unexpected query: {body!r}")
+                conn.sendall(struct.pack("!H", len(response)) + response)
+
+        thread = threading.Thread(target=accept_once, daemon=True)
+        thread.start()
+
+        real_connect = socket.create_connection
+
+        def connect_to_test_port(address, timeout=None):
+            host, _port = address
+            assert _port == 53
+            return real_connect((host, port), timeout)
+
+        monkeypatch.setattr("buddelkiste.dns_proxy.socket.create_connection", connect_to_test_port)
+        got = forward_query(query, ["127.0.0.1"])
+        thread.join(timeout=2)
+
+    assert not errors
+    assert got == response

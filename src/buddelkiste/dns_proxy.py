@@ -151,14 +151,37 @@ def nxdomain_response(query: bytes) -> bytes:
     return bytes(header) + question
 
 
+def _recvexact(sock: socket.socket, size: int) -> bytes | None:
+    chunks = bytearray()
+    while len(chunks) < size:
+        piece = sock.recv(size - len(chunks))
+        if not piece:
+            return None
+        chunks.extend(piece)
+    return bytes(chunks)
+
+
 def forward_query(query: bytes, upstreams: Sequence[str], timeout: float = 2.0) -> bytes | None:
+    """Forward a DNS query to an upstream resolver.
+
+    Uses DNS-over-TCP so upstream queries are not caught by the in-namespace
+    nftables UDP/53 redirect that steers guest traffic to this proxy.
+    """
+    payload = struct.pack("!H", len(query)) + query
     for upstream in upstreams:
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            with socket.create_connection((upstream, 53), timeout=timeout) as sock:
                 sock.settimeout(timeout)
-                sock.sendto(query, (upstream, 53))
-                data, _addr = sock.recvfrom(65535)
-                return data
+                sock.sendall(payload)
+                header = _recvexact(sock, 2)
+                if header is None:
+                    continue
+                (length,) = struct.unpack("!H", header)
+                if length == 0 or length > 65535:
+                    continue
+                data = _recvexact(sock, length)
+                if data is not None:
+                    return data
         except OSError as exc:
             log.debug("DNS upstream %s failed: %s", upstream, exc)
     return None

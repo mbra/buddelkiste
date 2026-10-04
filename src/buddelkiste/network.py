@@ -593,7 +593,9 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp:
             if "10.0.2.3" not in upstreams:
                 upstreams.append("10.0.2.3")
         if not upstreams:
+            # Fallback resolver must also be allowlisted for TCP/53 upstreams.
             upstreams = ["1.1.1.1"]
+            extra_allow.append("1.1.1.1/32")
 
         use_proxy = net.needs_dns_proxy
         ruleset = build_nft_ruleset(net, extra_allow=extra_allow, dns_proxy=use_proxy)
@@ -601,7 +603,7 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp:
         apply_nft_ruleset(ruleset)
 
         if use_proxy:
-            preseed_host_allows(net.allow_hosts)
+            # Start before preseeding: guest-style resolves hit the UDP/53 redirect.
             proxy = DnsProxy(
                 upstreams=upstreams,
                 allow_hosts=net.allow_hosts,
@@ -609,6 +611,7 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp:
                 add_allow_ip=nft_add_allow_ip,
             )
             proxy.start()
+            preseed_host_allows(net.allow_hosts)
 
         proc = spawn_bwrap_dropped(bwrap_args)
         return proc.wait()
