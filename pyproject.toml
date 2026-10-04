@@ -29,3 +29,10 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-q"]
+markers = [
+    "integration: nested-safe integration tests (real bwrap / nested nft)",
+    "requires_nested_net: needs unshare --user --map-root-user --net",
+    "requires_nested_user: needs unshare --user --map-root-user",
+    "requires_tun: needs /dev/net/tun and filter-mode helpers",
+    "requires_outbound: needs outbound TCP to 1.1.1.1:443",
+]

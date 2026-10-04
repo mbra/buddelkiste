@@ -51,5 +51,13 @@ nftables allow sets from resolved A/AAAA records.
 ```bash
 uv sync
 uv run bk --help
-uv run pytest
+uv run pytest                 # unit + nested-safe integ; TUN e2e skipped if unavailable
+uv run pytest -m integration # real bwrap host/none + nested nft
+uv run pytest -m requires_tun # filter/pasta e2e (needs /dev/net/tun)
 ```
+
+Integration layout:
+
+- `tests/` — unit/contract tests (mocked subprocess where needed)
+- `tests/integ/` — nested-safe real `bwrap` (`host`/`none`), binds/env isolation, nested `nft`
+- `tests/integ_net/` — filter-mode e2e via pasta/slirp; skipped without `/dev/net/tun`

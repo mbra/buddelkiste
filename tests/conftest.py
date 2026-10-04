@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -18,3 +20,70 @@ def runtime_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     runtime.mkdir()
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
     return runtime
+
+
+@pytest.fixture
+def integ_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
+    """Isolated HOME/runtime/workdir with an empty feature allowlist."""
+    home = tmp_path / "home"
+    runtime = tmp_path / "runtime"
+    work = tmp_path / "work"
+    home.mkdir()
+    runtime.mkdir()
+    work.mkdir()
+
+    cfg_dir = home / ".config" / "buddelkiste"
+    cfg_dir.mkdir(parents=True)
+    config = cfg_dir / "config.toml"
+    config.write_text(
+        "features = []\n"
+        "\n"
+        "[[binds]]\n"
+        f'source = "{work}"\n'
+        "read_only = false\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    monkeypatch.chdir(work)
+    return {"home": home, "runtime": runtime, "work": work, "config": config}
+
+
+@pytest.fixture
+def run_bk(integ_workspace: dict[str, Path]):
+    """Run ``python -m buddelkiste`` as a real subprocess."""
+    import subprocess
+
+    def _run(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        env["HOME"] = str(integ_workspace["home"])
+        env["XDG_RUNTIME_DIR"] = str(integ_workspace["runtime"])
+        return subprocess.run(
+            [sys.executable, "-m", "buddelkiste", *args],
+            cwd=integ_workspace["work"],
+            env=env,
+            check=check,
+            capture_output=True,
+            text=True,
+        )
+
+    return _run
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers", "integration: nested-safe integration tests (real bwrap / nested nft)"
+    )
+    config.addinivalue_line(
+        "markers", "requires_nested_net: needs unshare --user --map-root-user --net"
+    )
+    config.addinivalue_line(
+        "markers", "requires_nested_user: needs unshare --user --map-root-user"
+    )
+    config.addinivalue_line(
+        "markers", "requires_tun: needs /dev/net/tun and filter-mode helpers"
+    )
+    config.addinivalue_line(
+        "markers", "requires_outbound: needs outbound TCP to 1.1.1.1:443"
+    )
