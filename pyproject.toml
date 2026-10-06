@@ -20,6 +20,7 @@ cursor = "buddelkiste.features:CURSOR"
 dbus = "buddelkiste.features:DBUS"
 docker = "buddelkiste.features:DOCKER"
 docker-proxy = "buddelkiste.features:DOCKER_PROXY"
+docker-instance = "buddelkiste.features:DOCKER_INSTANCE"
 git = "buddelkiste.features:GIT"
 google = "buddelkiste.features:GOOGLE"
 gui = "buddelkiste.features:GUI"
@@ -65,6 +66,7 @@ markers = [
     "requires_tun: needs /dev/net/tun and filter-mode helpers",
     "requires_outbound: needs outbound TCP to 1.1.1.1:443",
     "requires_docker: needs host Docker daemon; skipped inside bwrap sandboxes",
+    "requires_rootless_docker: needs rootlesskit + subuid/subgid for docker-instance",
 ]
 
 [tool.coverage.run]

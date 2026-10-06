@@ -120,6 +120,10 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "requires_docker: needs host Docker daemon; skipped inside bwrap sandboxes",
     )
+    config.addinivalue_line(
+        "markers",
+        "requires_rootless_docker: needs rootlesskit + subuid/subgid for docker-instance",
+    )
 
 
 def _configure_agent_pytest_defaults(config: pytest.Config) -> None:
@@ -154,3 +158,10 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
             pytest.skip("docker e2e requires a host (not bwrap) environment")
         if not has_docker():
             pytest.skip("docker daemon / CLI not available")
+    if item.get_closest_marker("requires_rootless_docker"):
+        from tests.probes import has_rootless_docker, in_bwrap_sandbox
+
+        if in_bwrap_sandbox():
+            pytest.skip("rootless docker-instance e2e requires a host environment")
+        if not has_rootless_docker():
+            pytest.skip("rootlesskit / subuid not available for docker-instance")

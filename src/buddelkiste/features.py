@@ -202,6 +202,15 @@ def docker_proxy_feature_setup() -> Iterator[Sequence[str]]:
         yield args
 
 
+@contextmanager
+def docker_instance_feature_setup() -> Iterator[Sequence[str]]:
+    from buddelkiste.cli import load_config
+    from buddelkiste.docker_instance import docker_instance_setup
+
+    with docker_instance_setup(config=load_config()) as args:
+        yield args
+
+
 def git_binds() -> list:
     home = _home()
     return [
@@ -374,7 +383,7 @@ DOCKER = Feature(
     description="Docker CLI config and user daemon socket",
     env_vars=("DOCKER_HOST",),
     binds=docker_binds,
-    conflicts_with=("docker-proxy",),
+    conflicts_with=("docker-proxy", "docker-instance"),
     origin="buddelkiste.features:DOCKER",
 )
 DOCKER_PROXY = Feature(
@@ -383,8 +392,17 @@ DOCKER_PROXY = Feature(
     default=False,
     binds=lambda: [ROBindConfig(_home() / ".docker")],
     setup=docker_proxy_feature_setup,
-    conflicts_with=("docker",),
+    conflicts_with=("docker", "docker-instance"),
     origin="buddelkiste.features:DOCKER_PROXY",
+)
+DOCKER_INSTANCE = Feature(
+    name="docker-instance",
+    description="Project-local rootless dockerd with FS/net isolation (default off)",
+    default=False,
+    binds=lambda: [ROBindConfig(_home() / ".docker")],
+    setup=docker_instance_feature_setup,
+    conflicts_with=("docker", "docker-proxy"),
+    origin="buddelkiste.features:DOCKER_INSTANCE",
 )
 GIT = Feature(
     name="git",

@@ -112,7 +112,14 @@ images (and related policy) for the project. Host enforcement lives under
 ~/.config/buddelkiste/docker-proxy/; use `bk docker-policy apply` to promote the
 declaration. Unknown images hold until `bk docker-policy approve` /
 `deny` when approval.on_unknown_image is "session" (the default). Mutually
-exclusive with the raw docker feature.
+exclusive with the raw docker and docker-instance features.
+
+docker_instance: Optional table for the docker-instance feature (project-local
+rootless dockerd). Keys: data_root (default under XDG_DATA_HOME), fs
+(host|project|data), fs_allow, net (host|userspace|none), proxy (default true),
+and nested [docker_instance.policy] (same shape as docker_proxy, with instance
+defaults that allow build and images=["*"]). Mutually exclusive with docker and
+docker-proxy.
 
 ## Example for a ~/.config/buddelkiste/config.toml configuration
 

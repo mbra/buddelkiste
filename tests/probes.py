@@ -138,3 +138,17 @@ def has_docker() -> bool:
     except (OSError, subprocess.TimeoutExpired):
         return False
     return proc.returncode == 0
+
+
+@cache
+def has_rootless_docker() -> bool:
+    """True when rootlesskit + subuid/subgid are available for docker-instance."""
+    import click
+
+    from buddelkiste.docker_instance import check_rootless_prerequisites
+
+    try:
+        check_rootless_prerequisites()
+    except click.ClickException:
+        return False
+    return True

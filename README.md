@@ -59,8 +59,9 @@ Toggle with CLI flags or config; see `bk list-features` for the live catalog
 | `asdf` | `~/.asdf`, `~/.tool-versions`, `ASDF_DIR` |
 | `cursor` | Cursor IDE/CLI install and state dirs |
 | `dbus` | session/system bus sockets, `DBUS_SESSION_BUS_ADDRESS` |
-| `docker` | `~/.docker`, Docker socket / `DOCKER_HOST` (conflicts with `docker-proxy`) |
-| `docker-proxy` | Filtered Docker API proxy + image allowlist (default **off**; conflicts with `docker`) |
+| `docker` | `~/.docker`, Docker socket / `DOCKER_HOST` (conflicts with `docker-proxy` / `docker-instance`) |
+| `docker-proxy` | Filtered Docker API proxy + image allowlist (default **off**; conflicts with `docker` / `docker-instance`) |
+| `docker-instance` | Project-local rootless dockerd + FS/net isolation (default **off**; conflicts with `docker` / `docker-proxy`) |
 | `git` | `~/.gitconfig`, `~/.config/git` |
 | `google` | `/opt/google` |
 | `gui` | display, GPU, audio, fonts, related env |
@@ -142,6 +143,15 @@ shim = false
 images = ["alpine:3.20", "postgres:16-alpine", "ghcr.io/example/*"]
 # on_unknown_image = "session"  # default: hold until approve/deny
 # on_unknown_image = "deny"     # immediate 403 (good for CI)
+
+# Project-local rootless daemon (docker-instance feature; default off)
+# [docker_instance]
+# fs = "project"       # host | project | data
+# net = "userspace"    # host | userspace | none
+# # data_root = "$XDG_DATA_HOME/buddelkiste/docker-instance/myproj"
+# # fs_allow = ["$HOME/.cache/go-build"]
+# # [docker_instance.policy]
+# # images = ["*"]
 
 # shims = false  # disable PATH shims globally (per-entry shim = true still wins)
 
@@ -290,7 +300,7 @@ when a sandboxed tool (agent, CI helper, …) should talk to Docker without a fu
 socket: the host `bk` process runs a filtered API proxy, binds only that socket
 into the sandbox, and sets `DOCKER_HOST` to it.
 
-`docker` and `docker-proxy` conflict; enable only one.
+`docker`, `docker-proxy`, and `docker-instance` conflict; enable only one.
 
 ### Enable
 
@@ -409,6 +419,55 @@ The control socket is **not** mounted into the sandbox — `pending` /
 - Socket paths are kept short enough for `AF_UNIX` (including a sibling `.ctl`
   control socket).
 
+## Docker instance
+
+**`docker-instance`** starts a temporary **rootless** `dockerd` with a dedicated
+store for this project, then (by default) puts the filtered API proxy in front
+and binds only that socket into the sandbox. Images and volumes live under
+`$XDG_DATA_HOME/buddelkiste/docker-instance/<project-key>/` (override with
+`data_root`) and do not touch the user-global Docker engine.
+
+Requires: `dockerd`, `rootlesskit`, `newuidmap`/`newgidmap`, `/etc/subuid` and
+`/etc/subgid` entries for your user; for `net = "userspace"` also `pasta`
+(passt) or `slirp4netns`. `fuse-overlayfs` is recommended for storage.
+
+```bash
+bk run --no-feature docker --feature docker-instance docker version
+```
+
+```toml
+features = { docker = false, docker-instance = true }
+
+[docker_instance]
+fs = "project"          # host | project | data — daemon mount namespace
+net = "userspace"       # host | userspace | none
+# data_root = "/path/to/store"
+# fs_allow = ["$HOME/.cache/go-build"]
+proxy = true            # agent sees only the filtered proxy socket
+
+# Optional; defaults allow build and images=["*"] on this private daemon
+# [docker_instance.policy]
+# images = ["*"]
+# [docker_instance.policy.api]
+# deny = ["commit", "swarm", "plugins", "session"]
+```
+
+| `fs` | Daemon can see |
+|------|----------------|
+| `host` | Full host filesystem (store still isolated) |
+| `project` (default) | Project root, `data_root`, `fs_allow`, minimal system paths |
+| `data` | `data_root` + `fs_allow` + minimal system only |
+
+| `net` | Behaviour |
+|-------|-----------|
+| `userspace` (default) | rootlesskit pasta/slirp4netns |
+| `host` | Share host network with the daemon helper |
+| `none` | No network for the daemon helper |
+
+HostConfig denials (privileged, host net, CapAdd, arbitrary binds, …) still
+apply when `proxy = true`. Unlike host `docker-proxy`, instance policy defaults
+**allow** `docker build` and use `images = ["*"]` on this private store.
+
 ## Network filter dependencies
 
 `network.mode = "filter"` needs **pasta** (from `passt`) or **slirp4netns**, plus
@@ -426,6 +485,7 @@ uv run pytest                 # unit + nested-safe integ + coverage; TUN/docker 
 uv run pytest -m integration  # real bwrap host/none + nested nft
 uv run pytest -m requires_tun # filter/pasta e2e (needs /dev/net/tun)
 uv run pytest -m requires_docker  # docker-proxy e2e (host Docker; skipped inside bwrap)
+uv run pytest -m requires_rootless_docker  # docker-instance e2e (needs rootlesskit)
 ```
 
 Integration layout:
@@ -433,4 +493,4 @@ Integration layout:
 - `tests/` — unit/contract tests (mocked subprocess where needed)
 - `tests/integ/` — nested-safe real `bwrap` (`host`/`none`), binds/env isolation, nested `nft` + DNS proxy/`nft add element`/`UDP/53` redirect against real tools
 - `tests/integ_net/` — filter-mode e2e via pasta/slirp (allow/deny IP & host, guest caps); skipped without `/dev/net/tun`
-- `tests/integ_docker/` — docker-proxy e2e against a real Docker engine; skipped inside bwrap sandboxes or without Docker
+- `tests/integ_docker/` — docker-proxy / docker-instance e2e; skipped inside bwrap or without Docker / rootlesskit

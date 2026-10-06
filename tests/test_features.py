@@ -35,6 +35,7 @@ def test_feature_catalog_is_topic_oriented() -> None:
     assert "ssh" in FEATURES
     assert "docker" in FEATURES
     assert "docker-proxy" in FEATURES
+    assert "docker-instance" in FEATURES
     assert "dbus" in FEATURES
     assert "xdg-open" in FEATURES
     assert "user" in FEATURES
@@ -53,6 +54,7 @@ def test_resolve_features_defaults_all_enabled() -> None:
     for name, feature in registry.items():
         assert enabled[name] is feature.default
     assert enabled["docker-proxy"] is False
+    assert enabled["docker-instance"] is False
     assert enabled["docker"] is True
 
 
