@@ -155,25 +155,31 @@ def policy_from_mapping(data: Mapping[str, Any], *, where: str) -> DockerProxyPo
     else:
         raise click.ClickException(f"{where}: images must be a list")
 
-    api = data.get("api") or {}
-    if api and not isinstance(api, dict):
+    api = data.get("api", {})
+    if not isinstance(api, dict):
         raise click.ClickException(f"{where}: api must be a table")
-    api_deny = tuple(str(x) for x in api.get("deny", DEFAULT_API_DENY)) if api else DEFAULT_API_DENY
+    api_deny = (
+        tuple(str(x) for x in api.get("deny", DEFAULT_API_DENY)) if api else DEFAULT_API_DENY
+    )
 
-    host_config = data.get("host_config") or {}
-    if host_config and not isinstance(host_config, dict):
+    host_config = data.get("host_config", {})
+    if not isinstance(host_config, dict):
         raise click.ClickException(f"{where}: host_config must be a table")
     deny_hc = (
         tuple(str(x) for x in host_config.get("deny", DEFAULT_DENY_HOST_CONFIG))
         if host_config
         else DEFAULT_DENY_HOST_CONFIG
     )
-    allow_binds = tuple(str(x) for x in host_config.get("allow_binds", ())) if host_config else ()
+    allow_binds = (
+        tuple(str(x) for x in host_config.get("allow_binds", ())) if host_config else ()
+    )
 
-    approval = data.get("approval") or {}
-    if approval and not isinstance(approval, dict):
+    approval = data.get("approval", {})
+    if not isinstance(approval, dict):
         raise click.ClickException(f"{where}: approval must be a table")
-    on_unknown = str(approval.get("on_unknown_image", data.get("on_unknown_image", "deny")))
+    on_unknown = str(
+        approval.get("on_unknown_image", data.get("on_unknown_image", "deny"))
+    )
     if on_unknown not in {"deny", "session"}:
         raise click.ClickException(
             f"{where}: on_unknown_image must be 'deny' or 'session' (got {on_unknown!r})"
@@ -378,7 +384,9 @@ def evaluate_request(
         image = str(payload.get("Image") or "")
         if not policy.allows_image(image):
             return ProxyDecision(False, f"image not allowlisted: {image}")
-        host_config = payload.get("HostConfig") or {}
+        host_config = payload.get("HostConfig")
+        if host_config is None:
+            host_config = {}
         if not isinstance(host_config, dict):
             return ProxyDecision(False, "HostConfig must be an object")
         violations = _host_config_violations(host_config, policy)
@@ -392,6 +400,9 @@ def evaluate_request(
     return ProxyDecision(True)
 
 
+_MAX_HTTP_HEADERS = 16 * 1024 * 1024
+
+
 def _read_http_request(conn: socket.socket) -> tuple[str, str, dict[str, str], bytes] | None:
     buf = bytearray()
     while b"\r\n\r\n" not in buf:
@@ -399,7 +410,7 @@ def _read_http_request(conn: socket.socket) -> tuple[str, str, dict[str, str], b
         if not chunk:
             return None
         buf.extend(chunk)
-        if len(buf) > 16 * 1024 * 1024:
+        if len(buf) > _MAX_HTTP_HEADERS:
             raise ValueError("HTTP headers too large")
 
     header_blob, rest = bytes(buf).split(b"\r\n\r\n", 1)
@@ -454,7 +465,23 @@ def _relay(a: socket.socket, b: socket.socket) -> None:
     sockets = {a, b}
     try:
         while sockets:
-            readable, _, errored = select.select(list(sockets), [], list(sockets), 60.0)
+            watch: list[socket.socket] = []
+            for sock in tuple(sockets):
+                try:
+                    if sock.fileno() < 0:
+                        sockets.discard(sock)
+                        continue
+                except OSError:
+                    sockets.discard(sock)
+                    continue
+                watch.append(sock)
+            if not watch:
+                break
+            try:
+                readable, _, errored = select.select(watch, [], watch, 60.0)
+            except (ValueError, OSError):
+                # Closed/invalid fds (fileno -1) race with teardown.
+                break
             if errored:
                 break
             if not readable:

@@ -10,6 +10,42 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def force_rmtree(path: Path | str) -> None:
+    """Remove a directory tree, including overlayfs work dirs left mode ``000``.
+
+    After ``bwrap --overlay`` exits, the kernel work subdirectory is often
+    ``d---------``, which makes a plain ``shutil.rmtree`` / pytest ``rm_rf``
+    fail with ``ENOTEMPTY`` / ``EACCES`` and leave ``garbage-*`` warnings.
+    """
+    root = Path(path)
+    if not root.exists():
+        return
+
+    def _unlock_and_remove(current: Path) -> None:
+        try:
+            os.chmod(current, 0o700)
+        except OSError:
+            pass
+        if current.is_dir() and not current.is_symlink():
+            try:
+                children = list(current.iterdir())
+            except OSError:
+                children = []
+            for child in children:
+                _unlock_and_remove(child)
+            try:
+                current.rmdir()
+            except OSError:
+                shutil.rmtree(current, ignore_errors=True)
+        else:
+            try:
+                current.unlink()
+            except OSError:
+                pass
+
+    _unlock_and_remove(root)
+
+
 @dataclass
 class BasicBindConfig:
     source: Path | str
@@ -94,7 +130,7 @@ class OverlayBindConfig(BasicBindConfig):
         else:
             work_path = Path(os.fspath(self.work))
         if work_path.exists():
-            shutil.rmtree(work_path)
+            force_rmtree(work_path)
         work_path.mkdir(parents=True)
         self.work = os.fspath(work_path)
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -23,7 +24,7 @@ def runtime_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
-def integ_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
+def integ_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Path]]:
     """Isolated HOME/runtime/workdir with an empty feature allowlist."""
     home = tmp_path / "home"
     runtime = tmp_path / "runtime"
@@ -47,7 +48,15 @@ def integ_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
     monkeypatch.chdir(work)
-    return {"home": home, "runtime": runtime, "work": work, "config": config}
+    yield {"home": home, "runtime": runtime, "work": work, "config": config}
+
+    # Overlayfs leaves ``.<upper>.work/work`` as mode 000; unlock so pytest
+    # can remove the basetemp without PytestWarning (rm_rf / ENOTEMPTY).
+    from buddelkiste.binds import force_rmtree
+
+    for path in tmp_path.rglob("*.work"):
+        if path.is_dir() and path.name.startswith("."):
+            force_rmtree(path)
 
 
 @pytest.fixture
@@ -72,6 +81,7 @@ def run_bk(integ_workspace: dict[str, Path]):
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    _configure_agent_pytest_defaults(config)
     config.addinivalue_line(
         "markers", "integration: nested-safe integration tests (real bwrap / nested nft)"
     )
@@ -91,6 +101,30 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "requires_docker: needs host Docker daemon; skipped inside bwrap sandboxes",
     )
+
+
+def _configure_agent_pytest_defaults(config: pytest.Config) -> None:
+    """Agent-only pytest tweaks (quiet progress, missing-line coverage).
+
+    Interactive runs keep normal verbosity so file names are visible, and a
+    compact coverage table without per-line Missing indicators.
+    """
+    if not os.environ.get("CURSOR_AGENT"):
+        return
+
+    # ``-q`` / verbose=-1; leave alone if the user passed ``-v`` / ``--verbosity``.
+    if getattr(config.option, "verbose", 0) == 0:
+        config.option.verbose = -1
+
+    cov_report = getattr(config.option, "cov_report", None)
+    if not isinstance(cov_report, dict):
+        return
+    if "term-missing" in cov_report:
+        return
+    if "term" in cov_report:
+        cov_report["term-missing"] = cov_report.pop("term")
+    else:
+        cov_report["term-missing"] = None
 
 
 def pytest_runtest_setup(item: pytest.Item) -> None:

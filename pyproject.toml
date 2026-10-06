@@ -51,9 +51,11 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = [
-    "-q",
-    "--cov=buddelkiste",
-    "--cov-report=term-missing",
+    # Enable pytest-cov; measured packages come from [tool.coverage.run] only.
+    # Passing --cov=buddelkiste *and* source_pkgs = ["buddelkiste"] duplicates the
+    # source list and triggers a spurious module-not-measured warning.
+    "--cov",
+    "--cov-report=term",
 ]
 markers = [
     "integration: nested-safe integration tests (real bwrap / nested nft)",
@@ -70,7 +72,7 @@ source_pkgs = ["buddelkiste"]
 relative_files = true
 
 [tool.coverage.report]
-show_missing = true
+show_missing = false
 skip_empty = true
 exclude_also = [
     "if __name__ == .__main__.:",
