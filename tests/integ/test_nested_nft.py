@@ -9,7 +9,6 @@ import pytest
 from buddelkiste.network import NetworkConfig, build_nft_ruleset
 from tests.probes import can_nested_nft
 
-
 pytestmark = pytest.mark.integration
 
 

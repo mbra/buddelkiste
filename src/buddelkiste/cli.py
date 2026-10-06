@@ -15,6 +15,8 @@ from pathlib import Path
 
 import click
 
+log = logging.getLogger(__name__)
+
 RUN_HELP = """Run a command inside a bubblewrap sandbox.
 
 Pass the executable and its arguments after any wrapper options. They are run
@@ -332,8 +334,8 @@ def run(
 
         if debug:
             log_cmdline(bwrap_args)
-            logging.debug("network mode=%s policy=%s allow=%s deny=%s",
-                          net.mode, net.policy, net.allow, net.deny)
+            log.debug("network mode=%s policy=%s allow=%s deny=%s",
+                      net.mode, net.policy, net.allow, net.deny)
 
         exit_code = run_bwrap(bwrap_args, net)
 
@@ -555,9 +557,8 @@ def ensure_cwd_in_sandbox(binds: list) -> None:
     """
     cwd = Path.cwd()
     for bind in binds:
-        if hasattr(bind, "covers_path"):
-            if bind.covers_path(cwd):
-                return
+        if hasattr(bind, "covers_path") and bind.covers_path(cwd):
+            return
 
     if not is_interactive():
         raise click.ClickException(
@@ -619,7 +620,8 @@ def get_env_args(config: dict, enabled: dict[str, bool] | None = None) -> Sequen
         value = cfg.get("value")
         if value is None:
             value = env(var_name)
-        res.extend(("--setenv", var_name, value))
+        if value is not None:
+            res.extend(("--setenv", var_name, value))
 
     return res
 
@@ -667,30 +669,30 @@ def append_executable_args(
 
 
 def log_cmdline(cmdline):
-    logging.debug("Running:")
+    log.debug("Running:")
     group = [cmdline[0]]
     for arg in cmdline[1:]:
         if arg.startswith("-"):
-            logging.debug("  %s", " ".join(group))
+            log.debug("  %s", " ".join(group))
             group.clear()
         group.append(arg)
-    logging.debug("  %s", " ".join(group))
+    log.debug("  %s", " ".join(group))
 
 
 # Re-export bind helpers for tests and callers that imported them from cli.
-from buddelkiste.binds import (  # noqa: E402
+from buddelkiste.binds import (
     BasicBindConfig,
     DevBindConfig,
     OverlayBindConfig,
-    TmpOverlayBindConfig,
     Tmpfs,
+    TmpOverlayBindConfig,
 )
-from buddelkiste.features import SshAgent, find_sandbox_ssh_key  # noqa: E402
+from buddelkiste.features import SshAgent, find_sandbox_ssh_key
 
 __all__ = [
+    "FEATURES",
     "BasicBindConfig",
     "DevBindConfig",
-    "FEATURES",
     "OverlayBindConfig",
     "ROBindConfig",
     "RWBindConfig",

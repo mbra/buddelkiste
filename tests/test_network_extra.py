@@ -18,8 +18,8 @@ from buddelkiste.network import (
     nameserver_ips,
     parse_network_table,
     preseed_host_allows,
-    resolve_network,
     resolv_conf_nameservers,
+    resolve_network,
     run_bwrap,
     run_network_inner,
     spawn_bwrap_dropped,
@@ -231,8 +231,8 @@ def test_run_network_inner_without_proxy(monkeypatch: pytest.MonkeyPatch) -> Non
         "buddelkiste.network.shutil.which",
         lambda name: f"/bin/{name}",
     )
-    monkeypatch.setattr("buddelkiste.network.resolv_conf_nameservers", lambda: [])
-    monkeypatch.setattr("buddelkiste.network.nameserver_ips", lambda: [])
+    monkeypatch.setattr("buddelkiste.network.resolv_conf_nameservers", list)
+    monkeypatch.setattr("buddelkiste.network.nameserver_ips", list)
     monkeypatch.setattr("buddelkiste.network.apply_nft_ruleset", lambda rules: None)
     proc = MagicMock()
     proc.wait.return_value = 11

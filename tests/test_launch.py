@@ -25,9 +25,8 @@ def test_resolve_launch_command_help_exits(help_arg: str) -> None:
     def dummy() -> None:
         pass
 
-    with dummy.make_context("dummy", []):
-        with pytest.raises(SystemExit) as excinfo:
-            resolve_launch_command([help_arg])
+    with dummy.make_context("dummy", []), pytest.raises(SystemExit) as excinfo:
+        resolve_launch_command([help_arg])
     assert excinfo.value.code == 0
 
 

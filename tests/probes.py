@@ -4,46 +4,46 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-from functools import lru_cache
+from functools import cache
 from pathlib import Path
 
 
-@lru_cache(maxsize=None)
+@cache
 def has_bwrap() -> bool:
     return shutil.which("bwrap") is not None
 
 
-@lru_cache(maxsize=None)
+@cache
 def has_nft() -> bool:
     return shutil.which("nft") is not None
 
 
-@lru_cache(maxsize=None)
+@cache
 def has_setpriv() -> bool:
     return shutil.which("setpriv") is not None
 
 
-@lru_cache(maxsize=None)
+@cache
 def has_pasta() -> bool:
     return shutil.which("pasta") is not None
 
 
-@lru_cache(maxsize=None)
+@cache
 def has_slirp4netns() -> bool:
     return shutil.which("slirp4netns") is not None
 
 
-@lru_cache(maxsize=None)
+@cache
 def has_net_helper() -> bool:
     return has_pasta() or has_slirp4netns()
 
 
-@lru_cache(maxsize=None)
+@cache
 def has_tun() -> bool:
     return Path("/dev/net/tun").exists()
 
 
-@lru_cache(maxsize=None)
+@cache
 def can_nested_user() -> bool:
     if not shutil.which("unshare"):
         return False
@@ -55,7 +55,7 @@ def can_nested_user() -> bool:
     return proc.returncode == 0
 
 
-@lru_cache(maxsize=None)
+@cache
 def can_nested_net() -> bool:
     if not shutil.which("unshare"):
         return False
@@ -67,7 +67,7 @@ def can_nested_net() -> bool:
     return proc.returncode == 0
 
 
-@lru_cache(maxsize=None)
+@cache
 def can_nested_nft() -> bool:
     if not (has_nft() and can_nested_net()):
         return False
@@ -90,7 +90,7 @@ def can_nested_nft() -> bool:
     return proc.returncode == 0
 
 
-@lru_cache(maxsize=None)
+@cache
 def has_outbound_network() -> bool:
     """Best-effort check that TCP to a public resolver port works."""
     import socket

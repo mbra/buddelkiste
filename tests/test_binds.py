@@ -324,8 +324,8 @@ def test_base_binds_include_dev_proc_tmpfs_and_omit_shadow(
     flat = get_bind_args(binds)
     assert flat[:2] == ["--dev", "/dev"]
     assert "--proc" in flat and flat[flat.index("--proc") + 1] == "/proc"
-    assert ("--tmpfs", "/tmp") in [(flat[i], flat[i + 1]) for i in range(0, len(flat) - 1)]
-    assert ("--tmpfs", "/run") in [(flat[i], flat[i + 1]) for i in range(0, len(flat) - 1)]
+    assert ("--tmpfs", "/tmp") in [(flat[i], flat[i + 1]) for i in range(len(flat) - 1)]
+    assert ("--tmpfs", "/run") in [(flat[i], flat[i + 1]) for i in range(len(flat) - 1)]
     assert "/etc/shadow" not in flat
 
 

@@ -233,7 +233,7 @@ def test_dns_proxy_handle_paths(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_dns_proxy_start_stop_and_serve(monkeypatch: pytest.MonkeyPatch) -> None:
     sock = MagicMock()
     sock.recvfrom.side_effect = [
-        socket.timeout(),
+        TimeoutError(),
         (b"dead", ("127.0.0.1", 1)),
         (b"nodata", ("127.0.0.1", 2)),
         OSError("closed"),

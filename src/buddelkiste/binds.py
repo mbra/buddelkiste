@@ -26,9 +26,10 @@ class BasicBindConfig:
     def __iter__(self) -> Iterator[str]:
         if self.flag is None:
             raise TypeError(f"{type(self).__name__} requires a bind flag")
-        srcpath = Path(self.source)
-        if srcpath.exists():
-            yield from [self.flag, self.source, self.target]
+        source = os.fspath(self.source)
+        target = os.fspath(self.target) if self.target is not None else source
+        if Path(source).exists():
+            yield from (self.flag, source, target)
 
     def covers_path(self, path: Path) -> bool:
         source = Path(self.source)
@@ -69,8 +70,10 @@ class TmpOverlayBindConfig(BasicBindConfig):
     """Read from source; sandbox writes go to an ephemeral tmpfs overlay."""
 
     def __iter__(self) -> Iterator[str]:
-        if Path(self.source).exists():
-            yield from ("--overlay-src", self.source, "--tmp-overlay", self.target)
+        source = os.fspath(self.source)
+        target = os.fspath(self.target) if self.target is not None else source
+        if Path(source).exists():
+            yield from ("--overlay-src", source, "--tmp-overlay", target)
 
 
 @dataclass(kw_only=True)
@@ -96,14 +99,19 @@ class OverlayBindConfig(BasicBindConfig):
         self.work = os.fspath(work_path)
 
     def __iter__(self) -> Iterator[str]:
-        if Path(self.source).exists():
+        source = os.fspath(self.source)
+        target = os.fspath(self.target) if self.target is not None else source
+        work = self.work
+        if work is None:
+            raise TypeError("OverlayBindConfig.work was not initialized")
+        if Path(source).exists():
             yield from (
                 "--overlay-src",
-                self.source,
+                source,
                 "--overlay",
-                self.upper,
-                self.work,
-                self.target,
+                os.fspath(self.upper),
+                os.fspath(work),
+                target,
             )
 
 

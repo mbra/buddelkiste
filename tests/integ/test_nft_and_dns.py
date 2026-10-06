@@ -12,7 +12,6 @@ import pytest
 
 from tests.probes import can_nested_nft, has_outbound_network
 
-
 pytestmark = pytest.mark.integration
 
 

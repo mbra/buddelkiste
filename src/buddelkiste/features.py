@@ -50,7 +50,7 @@ class Feature:
     description: str
     default: bool = True
     env_vars: tuple[str, ...] = ()
-    binds: Callable[[], list] = field(default_factory=lambda: lambda: [])
+    binds: Callable[[], list] = field(default_factory=lambda: list)
     setup: Callable[[], AbstractContextManager[Sequence[str]]] | None = None
     # Module path or config location shown in `bk list-features`.
     origin: str = ""
@@ -224,9 +224,11 @@ def gui_binds() -> list:
 
 
 class SshAgent:
-    socket: Path
+    socket: Path | None
+    _proc: subprocess.Popen[bytes] | None
+    _agent_dir: Path | None
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.socket = None
         self._proc = None
         self._agent_dir = None
@@ -259,22 +261,28 @@ class SshAgent:
         self.socket = socket
         return self
 
-    def add_key(self, path: Path):
+    def add_key(self, path: Path) -> None:
+        if self.socket is None:
+            raise click.ClickException("ssh-agent is not running")
         subprocess.run(
             ["ssh-add", "-q", str(path)],
             env={**os.environ, "SSH_AUTH_SOCK": str(self.socket)},
             check=True,
         )
 
-    def __exit__(self, exc_type, exc_value, traceback):
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
         proc = self._proc
+        agent_dir = self._agent_dir
         self._proc = None
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:  # pragma: nocover
-            proc.kill()
-        shutil.rmtree(self._agent_dir, ignore_errors=True)
+        self._agent_dir = None
+        if proc is not None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:  # pragma: nocover
+                proc.kill()
+        if agent_dir is not None:
+            shutil.rmtree(agent_dir, ignore_errors=True)
 
 
 def find_sandbox_ssh_key() -> Path | None:
@@ -287,6 +295,7 @@ def find_sandbox_ssh_key() -> Path | None:
 @contextmanager
 def ssh_setup() -> Iterator[Sequence[str]]:
     with SshAgent() as ssh_agent:
+        assert ssh_agent.socket is not None
         if ssh_key := find_sandbox_ssh_key():
             ssh_agent.add_key(ssh_key)
         yield [

@@ -365,9 +365,7 @@ def nameserver_ips(path: Path | None = None) -> list[str]:
     ips: list[str] = []
     for cidr in resolv_conf_nameservers(path):
         net = ipaddress.ip_network(cidr, strict=False)
-        if net.version == 4 and net.prefixlen == 32:
-            ips.append(str(net.network_address))
-        elif net.version == 6 and net.prefixlen == 128:
+        if net.version == 4 and net.prefixlen == 32 or net.version == 6 and net.prefixlen == 128:
             ips.append(str(net.network_address))
     return ips
 
@@ -560,7 +558,7 @@ def preseed_host_allows(hosts: Sequence[str]) -> None:
             continue
         seen: set[str] = set()
         for info in infos:
-            ip = info[4][0]
+            ip = str(info[4][0])
             if ip in seen:
                 continue
             seen.add(ip)

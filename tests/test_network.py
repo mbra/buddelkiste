@@ -14,8 +14,8 @@ from buddelkiste.network import (
     expand_deny_presets,
     format_deny_presets_help,
     load_deny_preset_registry,
-    resolve_network,
     resolv_conf_nameservers,
+    resolve_network,
     run_bwrap,
     with_share_net,
 )

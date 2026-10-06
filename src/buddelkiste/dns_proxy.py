@@ -12,7 +12,7 @@ from collections.abc import Callable, Sequence
 
 log = logging.getLogger(__name__)
 
-_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", re.I)
+_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", re.IGNORECASE)
 
 DNS_PROXY_PORT = 15353
 
@@ -28,9 +28,7 @@ def is_valid_hostname_pattern(value: str) -> bool:
     elif "*" in text:
         return False
     labels = text.split(".")
-    if any(not label or not _LABEL_RE.match(label) for label in labels):
-        return False
-    return True
+    return not any(not label or not _LABEL_RE.match(label) for label in labels)
 
 
 def host_matches(qname: str, patterns: Sequence[str]) -> bool:
@@ -233,7 +231,7 @@ class DnsProxy:
         while not self._stop.is_set():
             try:
                 data, addr = self._sock.recvfrom(65535)
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 break
