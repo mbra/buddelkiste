@@ -15,6 +15,25 @@ def tmp_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return config
 
 
+@pytest.fixture(autouse=True)
+def _disable_docker_proxy_desktop_notifications(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep notify-send popups off the host desktop during the test suite."""
+    import shutil
+
+    import buddelkiste.docker_proxy as dp
+
+    real_which = shutil.which
+
+    def which(cmd: str, *args: object, **kwargs: object) -> str | None:
+        if cmd == "notify-send":
+            return None
+        return real_which(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(dp.shutil, "which", which)
+
+
 @pytest.fixture
 def runtime_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     runtime = tmp_path / "runtime"

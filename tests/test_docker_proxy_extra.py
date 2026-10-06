@@ -453,3 +453,530 @@ def test_handle_client_logs_handler_exception(
             server.close()
         except OSError:
             pass
+
+
+def test_grant_session_image_empty_and_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from buddelkiste.docker_proxy import grant_session_image, session_policy_path
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(click.ClickException, match="empty image"):
+        grant_session_image("  ")
+
+    path = grant_session_image("redis:7", key="proj")
+    assert path == session_policy_path("proj")
+    assert "redis:7" in load_policy_file(path).images
+    # Second grant is a no-op when already allowlisted.
+    assert grant_session_image("redis:7", key="proj") == path
+    assert load_policy_file(path).images == ("redis:7",)
+
+
+def test_pull_without_tag_and_create_without_host_config() -> None:
+    policy = DockerProxyPolicy(images=("busybox", "alpine:3.20"))
+    pull = evaluate_request(
+        "POST",
+        "/images/create?fromImage=busybox",
+        b"",
+        policy,
+    )
+    assert pull.allow
+    assert pull.image == "busybox"
+
+    create = evaluate_request(
+        "POST",
+        "/containers/create",
+        json.dumps({"Image": "alpine:3.20"}).encode(),
+        policy,
+    )
+    assert create.allow
+
+
+def test_host_config_lowercase_source_key() -> None:
+    violations = _host_config_violations(
+        {"Mounts": [{"Type": "bind", "source": "/etc/shadow"}]},
+        DockerProxyPolicy(images=("a:1",), allow_binds=("/tmp/*",)),
+    )
+    assert any(v.startswith("Binds:/etc/shadow") for v in violations)
+
+
+def test_build_upstream_adds_connection_when_only_upgrade() -> None:
+    raw = _build_upstream_request("POST", "/attach", {"Upgrade": "tcp"}, b"")
+    text = raw.decode("latin-1")
+    assert "Upgrade: tcp" in text
+    assert "Connection: Upgrade" in text
+
+
+def test_read_http_body_truncated_on_eof() -> None:
+    server, client = socket.socketpair()
+    try:
+        client.sendall(b"POST /x HTTP/1.1\r\nHost: h\r\nContent-Length: 10\r\n\r\nabc")
+        client.close()
+        parsed = _read_http_request(server)
+        assert parsed is not None
+        assert parsed[3] == b"abc"
+    finally:
+        server.close()
+
+
+def test_reload_policy_and_resolve_pending_edges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    from buddelkiste.docker_proxy import (
+        _PendingImage,
+        control_request,
+        host_policy_path,
+        runtime_path,
+    )
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+
+    key = "edgeproj"
+    write_policy_file(
+        host_policy_path(key),
+        DockerProxyPolicy(images=("kept:1",), on_unknown_image="session"),
+    )
+
+    listen = tmp_path / "proxy.sock"
+    docker_sock = tmp_path / "docker.sock"
+    proxy = DockerProxyServer(
+        listen,
+        docker_sock,
+        DockerProxyPolicy(images=("kept:1",), on_unknown_image="session"),
+        policy_key=key,
+        config={"docker_proxy": {"images": ["cfg:1"]}},
+    )
+    # Pre-create sockets so start() unlinks them.
+    listen.write_text("stale")
+    proxy.control_sock.write_text("stale-ctl")
+    proxy.start()
+    try:
+        assert runtime_path(key).is_file()
+        reloaded = proxy.reload_policy()
+        assert "kept:1" in reloaded.images
+        assert "cfg:1" in reloaded.images
+
+        with pytest.raises(click.ClickException, match="no pending"):
+            proxy.resolve_pending(approve=True)
+
+        with proxy._pending_lock:
+            proxy._pending["one:1"] = _PendingImage(
+                id="aaaa1111", image="one:1", created=time.time()
+            )
+            proxy._pending["two:1"] = _PendingImage(
+                id="bbbb2222", image="two:1", created=time.time() + 0.01
+            )
+
+        with pytest.raises(click.ClickException, match="multiple pending"):
+            proxy.resolve_pending(approve=False)
+
+        with pytest.raises(click.ClickException, match="no pending approval matching"):
+            proxy.resolve_pending(target="missing:9", approve=False)
+
+        denied = proxy.resolve_pending(target="aaaa1111", approve=False)
+        assert denied["image"] == "one:1"
+        assert denied["approved"] is False
+
+        # Coalesce concurrent waiters for the remaining pending image.
+        results: list[bool] = []
+
+        def waiter() -> None:
+            results.append(proxy.wait_for_image_approval("two:1"))
+
+        w1 = threading.Thread(target=waiter, daemon=True)
+        w2 = threading.Thread(target=waiter, daemon=True)
+        w1.start()
+        w2.start()
+        for _ in range(50):
+            if len(proxy.list_pending()) >= 1:
+                break
+            time.sleep(0.02)
+        ok = control_request(
+            {"op": "approve", "target": "two:1@sha256:abc"}, key=key
+        )
+        assert ok.get("ok") is True
+        w1.join(timeout=2)
+        w2.join(timeout=2)
+        assert results == [True, True]
+        assert proxy.current_policy().allows_image("two:1")
+
+        bad = control_request({"op": "nope"}, key=key)
+        assert bad.get("ok") is False
+        empty_deny = control_request({"op": "deny"}, key=key)
+        assert empty_deny.get("ok") is False
+
+        # Approve when image already allowlisted skips in-memory append branch.
+        with proxy._pending_lock:
+            proxy._pending["kept:1"] = _PendingImage(
+                id="cccc3333", image="kept:1", created=time.time()
+            )
+        already = proxy.resolve_pending(target="kept:1", approve=True)
+        assert already["approved"] is True
+    finally:
+        proxy.stop()
+        assert not runtime_path(key).is_file()
+
+
+def test_clear_runtime_ignores_foreign_pid_and_bad_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from buddelkiste.docker_proxy import runtime_path
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    key = "clearkey"
+    path = runtime_path(key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"pid": 1, "control_sock": "/tmp/x"}\n', encoding="utf-8")
+    proxy = DockerProxyServer(
+        tmp_path / "p.sock", tmp_path / "d.sock", DockerProxyPolicy(), policy_key=key
+    )
+    proxy._clear_runtime()
+    assert path.is_file()  # foreign pid left alone
+
+    path.write_text("{not-json", encoding="utf-8")
+    proxy._clear_runtime()  # invalid JSON ignored
+    assert path.is_file()
+
+
+def test_read_runtime_and_control_request_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from buddelkiste.docker_proxy import (
+        control_request,
+        read_runtime,
+        runtime_path,
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    monkeypatch.chdir(tmp_path)
+    key = "rtkey"
+    path = runtime_path(key)
+
+    with pytest.raises(click.ClickException, match="no live docker-proxy"):
+        read_runtime(key=key)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{bad", encoding="utf-8")
+    with pytest.raises(click.ClickException, match="invalid runtime"):
+        read_runtime(key=key)
+
+    path.write_text("[1, 2]\n", encoding="utf-8")
+    with pytest.raises(click.ClickException, match="invalid runtime"):
+        read_runtime(key=key)
+
+    path.write_text(json.dumps({"pid": 1}) + "\n", encoding="utf-8")
+    with pytest.raises(click.ClickException, match="missing control_sock"):
+        control_request({"op": "list"}, key=key)
+
+    path.write_text(
+        json.dumps({"pid": 1, "control_sock": str(tmp_path / "missing.ctl")}) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(click.ClickException, match="cannot connect"):
+        control_request({"op": "list"}, key=key)
+
+
+def test_recv_json_line_edge_cases() -> None:
+    from buddelkiste.docker_proxy import _recv_json_line
+
+    server, client = socket.socketpair()
+    try:
+        client.close()
+        assert _recv_json_line(server) is None
+    finally:
+        server.close()
+
+    server, client = socket.socketpair()
+    try:
+        client.sendall(b"[1,2]\n")
+        with pytest.raises(ValueError, match="JSON object"):
+            _recv_json_line(server)
+    finally:
+        server.close()
+        client.close()
+
+    server, client = socket.socketpair()
+    try:
+        client.sendall(b"x" * 20)
+        with pytest.raises(ValueError, match="too large"):
+            _recv_json_line(server, limit=8)
+    finally:
+        server.close()
+        client.close()
+
+
+def test_control_handler_empty_and_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from buddelkiste.docker_proxy import control_request, runtime_path
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    proxy = DockerProxyServer(
+        tmp_path / "p.sock",
+        tmp_path / "d.sock",
+        DockerProxyPolicy(),
+        policy_key="ctl",
+    )
+    server, client = socket.socketpair()
+    try:
+        client.close()
+        proxy._handle_control_client(server)
+    finally:
+        try:
+            server.close()
+        except OSError:
+            pass
+
+    # Invalid JSON triggers exception path and error response.
+    server, client = socket.socketpair()
+    try:
+        client.sendall(b"{bad\n")
+        proxy._handle_control_client(server)
+        resp = client.recv(65536)
+        assert b'"ok": false' in resp or b'"ok":false' in resp
+    finally:
+        try:
+            client.close()
+        except OSError:
+            pass
+        try:
+            server.close()
+        except OSError:
+            pass
+
+    # Peer accepts, reads the request, then closes without a reply.
+    listen = tmp_path / "ctl.sock"
+    if listen.exists():
+        listen.unlink()
+    acceptor = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    acceptor.bind(str(listen))
+    acceptor.listen(1)
+
+    def accept_read_close() -> None:
+        c, _ = acceptor.accept()
+        try:
+            c.recv(4096)
+        finally:
+            c.close()
+
+    threading.Thread(target=accept_read_close, daemon=True).start()
+    rt = runtime_path("ctl")
+    rt.parent.mkdir(parents=True, exist_ok=True)
+    rt.write_text(
+        json.dumps({"pid": 1, "control_sock": str(listen)}) + "\n", encoding="utf-8"
+    )
+    with pytest.raises(click.ClickException, match="empty response"):
+        control_request({"op": "list"}, key="ctl")
+    acceptor.close()
+
+
+def test_short_listen_socket_impossible_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import buddelkiste.docker_proxy as dp
+
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setattr(dp, "_AF_UNIX_PATH_MAX", 5)
+    monkeypatch.setattr(dp.tempfile, "gettempdir", lambda: "/" + ("y" * 20))
+    with pytest.raises(click.ClickException, match="short enough path"):
+        _short_listen_socket(Path("/" + ("z" * 20)))
+
+
+def test_stop_denies_pending_waiters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    proxy = DockerProxyServer(
+        tmp_path / "p.sock",
+        tmp_path / "d.sock",
+        DockerProxyPolicy(on_unknown_image="session"),
+        policy_key="stopkey",
+    )
+    proxy.start()
+    result: list[bool] = []
+
+    def waiter() -> None:
+        result.append(proxy.wait_for_image_approval("gone:1"))
+
+    thread = threading.Thread(target=waiter, daemon=True)
+    thread.start()
+    for _ in range(50):
+        if proxy.list_pending():
+            break
+        time.sleep(0.02)
+    proxy.stop()
+    thread.join(timeout=2)
+    assert result == [False]
+
+
+def test_notify_pending_image_approval_best_effort(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    from buddelkiste.docker_proxy import _notify_pending_image_approval
+
+    calls: list[list[str]] = []
+
+    def fake_popen(cmd: list[str], **kwargs: object) -> object:
+        calls.append(list(cmd))
+        return object()
+
+    # Autouse conftest already hides notify-send; exercise that path first.
+    with caplog.at_level(logging.WARNING):
+        _notify_pending_image_approval("deadbeef", "evil:1")
+    assert calls == []
+    assert "notify-send not found" in caplog.text
+    assert "evil:1" in caplog.text
+
+    monkeypatch.setattr(
+        "buddelkiste.docker_proxy.shutil.which", lambda name: f"/usr/bin/{name}"
+    )
+    monkeypatch.setattr("buddelkiste.docker_proxy.subprocess.Popen", fake_popen)
+    _notify_pending_image_approval("deadbeef", "evil:1")
+    assert len(calls) == 1
+    assert calls[0][0] == "/usr/bin/notify-send"
+    assert "evil:1" in calls[0][-1]
+    assert "approve deadbeef" in calls[0][-1]
+
+    def boom(*_a: object, **_k: object) -> object:
+        raise OSError("no dbus")
+
+    monkeypatch.setattr("buddelkiste.docker_proxy.subprocess.Popen", boom)
+    with caplog.at_level(logging.WARNING):
+        _notify_pending_image_approval("deadbeef", "evil:1")  # must not raise
+    assert "notify-send failed" in caplog.text
+
+
+def test_wait_for_image_approval_notifies_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    notified: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "buddelkiste.docker_proxy._notify_pending_image_approval",
+        lambda pid, image: notified.append((pid, image)),
+    )
+
+    proxy = DockerProxyServer(
+        tmp_path / "p.sock",
+        tmp_path / "d.sock",
+        DockerProxyPolicy(on_unknown_image="session"),
+        policy_key="notifykey",
+    )
+    proxy.start()
+    try:
+        results: list[bool] = []
+
+        def waiter() -> None:
+            results.append(proxy.wait_for_image_approval("img:9"))
+
+        t1 = threading.Thread(target=waiter, daemon=True)
+        t1.start()
+        for _ in range(50):
+            if proxy.list_pending():
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError("pending never appeared")
+
+        t2 = threading.Thread(target=waiter, daemon=True)
+        t2.start()
+        for _ in range(50):
+            if t1.is_alive() and t2.is_alive():
+                break
+            time.sleep(0.02)
+        time.sleep(0.05)
+        assert len(notified) == 1
+        assert notified[0][1] == "img:9"
+        assert len(proxy.list_pending()) == 1
+
+        proxy.resolve_pending(approve=False)
+        t1.join(timeout=2)
+        t2.join(timeout=2)
+        assert sorted(results) == [False, False]
+    finally:
+        proxy.stop()
+
+
+def test_cli_docker_policy_approve_deny_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    from click.testing import CliRunner
+
+    from buddelkiste.cli import cli
+    from buddelkiste.docker_proxy import _PendingImage
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+
+    key = project_policy_key()
+    listen = tmp_path / "proxy.sock"
+    proxy = DockerProxyServer(
+        listen,
+        tmp_path / "d.sock",
+        DockerProxyPolicy(on_unknown_image="session"),
+        policy_key=key,
+    )
+    proxy.start()
+    runner = CliRunner()
+    try:
+        listed = runner.invoke(cli, ["docker-policy", "pending"])
+        assert listed.exit_code == 0
+        assert "No pending" in listed.output
+
+        with proxy._pending_lock:
+            proxy._pending["img:1"] = _PendingImage(
+                id="deadbeef", image="img:1", created=time.time()
+            )
+        pending = runner.invoke(cli, ["docker-policy", "pending"])
+        assert pending.exit_code == 0
+        assert "deadbeef" in pending.output
+        assert "img:1" in pending.output
+
+        deny = runner.invoke(cli, ["docker-policy", "deny", "deadbeef"])
+        assert deny.exit_code == 0
+        assert "Denied" in deny.output
+
+        with proxy._pending_lock:
+            proxy._pending["img:2"] = _PendingImage(
+                id="cafebabe", image="img:2", created=time.time()
+            )
+        approve = runner.invoke(cli, ["docker-policy", "approve", "img:2"])
+        assert approve.exit_code == 0
+        assert "Approved" in approve.output
+
+        fail = runner.invoke(cli, ["docker-policy", "approve"])
+        assert fail.exit_code != 0
+    finally:
+        proxy.stop()

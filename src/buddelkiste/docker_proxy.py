@@ -6,7 +6,8 @@ dangerous HostConfig fields.
 
 When ``on_unknown_image`` is ``session``, unknown image pulls/creates are held
 until ``bk docker-policy approve`` / ``deny`` resolves them via the control
-socket (so the agent TTY is not used for the prompt).
+socket (so the agent TTY is not used for the prompt). A desktop notification
+is raised when a new pending approval appears (best-effort via ``notify-send``).
 """
 
 from __future__ import annotations
@@ -16,7 +17,9 @@ import logging
 import os
 import re
 import select
+import shutil
 import socket
+import subprocess
 import tempfile
 import threading
 import time
@@ -677,6 +680,48 @@ class _PendingImage:
     approved: bool | None = None
 
 
+def _notify_pending_image_approval(pending_id: str, image: str) -> None:
+    """Best-effort desktop notification for a held image (does not touch the TTY)."""
+    notify = shutil.which("notify-send")
+    if not notify:
+        log.warning(
+            "notify-send not found; cannot notify for pending image approval "
+            "id=%s image=%s (bk docker-policy approve %s)",
+            pending_id,
+            image,
+            pending_id,
+        )
+        return
+    title = "buddelkiste docker-proxy"
+    body = (
+        f"Approval required for image {image}\n"
+        f"bk docker-policy approve {pending_id}"
+    )
+    try:
+        subprocess.Popen(
+            [
+                notify,
+                "--app-name=buddelkiste",
+                "--urgency=normal",
+                "--icon=dialog-question",
+                "--expire-time=0",
+                title,
+                body,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        log.warning(
+            "notify-send failed for pending image approval id=%s image=%s",
+            pending_id,
+            image,
+            exc_info=True,
+        )
+
+
 class DockerProxyServer:
     """Background Docker API proxy bound to a Unix socket."""
 
@@ -720,6 +765,7 @@ class DockerProxyServer:
     def wait_for_image_approval(self, image: str) -> bool:
         """Block until approve/deny for ``image``; return True if approved."""
         normalized = _normalize_image_ref(image)
+        notify = False
         with self._pending_lock:
             pending = self._pending.get(normalized)
             if pending is None:
@@ -729,6 +775,7 @@ class DockerProxyServer:
                     created=time.time(),
                 )
                 self._pending[normalized] = pending
+                notify = True
                 log.warning(
                     "docker-proxy pending approval id=%s image=%s "
                     "(bk docker-policy approve %s)",
@@ -737,6 +784,9 @@ class DockerProxyServer:
                     pending.id,
                 )
             event = pending.event
+            pending_id = pending.id
+        if notify:
+            _notify_pending_image_approval(pending_id, normalized)
         event.wait()
         with self._pending_lock:
             # approved may be None if woken by stop(); treat as deny

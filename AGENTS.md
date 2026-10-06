@@ -1,5 +1,12 @@
 # Agent notes
 
+## Running tests
+
+Prefer ``just test`` (with optional pytest args after ``--``) over invoking
+``uv run pytest`` directly. Example::
+
+   just test tests/test_docker_proxy.py -q --cov=buddelkiste.docker_proxy
+
 ## Continuous host test feedback (`scripts/debug-loop`)
 
 When iterating on failures that must run **outside** the agent sandbox (e.g.
