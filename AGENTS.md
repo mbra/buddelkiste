@@ -7,6 +7,39 @@ Prefer ``just test`` (with optional pytest args after ``--``) over invoking
 
    just test tests/test_docker_proxy.py -q --cov=buddelkiste.docker_proxy
 
+## Lint and typecheck before commit
+
+Before creating a commit, run both and fix any findings::
+
+   just lint
+   just typecheck
+
+- ``just lint`` — ``ruff check`` on ``src``, ``tests``, and ``scripts``
+- ``just typecheck`` — ``ty check`` on ``src``
+
+Do not commit with known ruff or ty failures. Extra args go after ``--``
+(e.g. ``just lint -- --fix``).
+
+## Commit message style
+
+- Subject: imperative, specific about the change; at most 100 characters.
+- Body: more verbose than a one-liner—say *why* and what areas moved
+  (modules, CLI, tests), not only “fix X” / “update Y”.
+- Wrap all lines at **at most 100 characters**.
+- Prefer a short paragraph or a few sentences over bullet spam unless the
+  change is a list of unrelated items.
+- Keep Co-authored-by trailers if the tooling already added them; do not
+  invent trailers.
+
+Example shape::
+
+   Hold unknown docker-proxy images until CLI approve or deny.
+
+   Default on_unknown_image to "session": park create/pull requests, expose a
+   control socket plus runtime metadata, and add bk docker-policy
+   pending/approve/deny so operators can grant session access from a separate
+   host terminal without touching the agent TTY.
+
 ## Continuous host test feedback (`scripts/debug-loop`)
 
 When iterating on failures that must run **outside** the agent sandbox (e.g.
