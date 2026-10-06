@@ -11,6 +11,18 @@ setup:
     fi
     uv sync --group dev
 
+# Run the test suite (pass extra pytest args after --).
+test *args:
+    cd "{{justfile_directory()}}" && uv run pytest {{args}}
+
+# Lint with ruff (pass extra ruff args after --).
+lint *args:
+    cd "{{justfile_directory()}}" && uv run ruff check src tests scripts {{args}}
+
+# Typecheck with ty (pass extra ty args after --).
+typecheck *args:
+    cd "{{justfile_directory()}}" && uv run ty check src {{args}}
+
 # Tag and build the next release candidate (omit version to be prompted).
 rc *args:
     "{{justfile_directory()}}/scripts/release" --rc {{args}}
