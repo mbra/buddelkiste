@@ -52,6 +52,8 @@ class Feature:
     env_vars: tuple[str, ...] = ()
     binds: Callable[[], list] = field(default_factory=lambda: list)
     setup: Callable[[], AbstractContextManager[Sequence[str]]] | None = None
+    # Other feature names that must not be enabled at the same time.
+    conflicts_with: tuple[str, ...] = ()
     # Module path or config location shown in `bk list-features`.
     origin: str = ""
 
@@ -610,7 +612,21 @@ def parse_toml_feature(name: str, data: dict) -> Feature:
                 f"feature.{name}.binds[{index}] must be a table with 'source'"
             )
 
-    unknown = set(data) - {"description", "default", "env", "env_vars", "binds"}
+    conflicts_spec = data.get("conflicts_with", [])
+    if not isinstance(conflicts_spec, list):
+        raise click.ClickException(
+            f"feature.{name}.conflicts_with must be a list of feature names"
+        )
+    conflicts_with = tuple(str(item) for item in conflicts_spec)
+
+    unknown = set(data) - {
+        "description",
+        "default",
+        "env",
+        "env_vars",
+        "binds",
+        "conflicts_with",
+    }
     if unknown:
         keys = ", ".join(sorted(unknown))
         raise click.ClickException(f"feature.{name} has unknown keys: {keys}")
@@ -621,6 +637,7 @@ def parse_toml_feature(name: str, data: dict) -> Feature:
         default=default,
         env_vars=env_vars,
         binds=_toml_binds_factory(binds_spec, feature_name=name),
+        conflicts_with=conflicts_with,
         origin=f"config:[feature.{name}]",
     )
 
@@ -814,16 +831,17 @@ def feature_env_var_names(
 def feature_setup(
     enabled: dict[str, bool],
     config: dict | None = None,
-) -> Iterator[list[str]]:
-    """Run setup hooks for enabled features; yield extra bwrap args."""
+) -> Iterator[list[tuple[str, Sequence[str]]]]:
+    """Run setup hooks for enabled features; yield ``(feature, bwrap args)`` parts."""
     registry = load_feature_registry(config or {})
-    extra: list[str] = []
+    parts: list[tuple[str, Sequence[str]]] = []
     with ExitStack() as stack:
         for name in enabled_feature_names(enabled, registry):
             setup = registry[name].setup
             if setup is not None:
-                extra.extend(stack.enter_context(setup()))
-        yield extra
+                args = tuple(stack.enter_context(setup()))
+                parts.append((name, args))
+        yield parts
 
 
 def format_features_help(config: dict | None = None) -> str:

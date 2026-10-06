@@ -73,9 +73,13 @@ features: Global feature selection. Either a list of feature names (allowlist)
 or a table of feature name = true/false overrides.
 
 feature: Table of custom feature definitions under [feature.<name>]. Each may
-set description, default, env (allowlisted variable names), and binds (list of
-source/target/mode tables). Bind paths may use $VAR or ${VAR}. Packages
+set description, default, env (allowlisted variable names), binds (list of
+source/target/mode tables), and conflicts_with (other feature names that must
+not be enabled at the same time). Bind paths may use $VAR or ${VAR}. Packages
 may also register features via the buddelkiste.features entry-point group.
+Before starting, bk refuses launches with conflicting mounts, conflicting
+--setenv values (host-forwarded or setup-defined), or mutually exclusive
+features.
 
 executables: Table keyed by executable path or basename. Each entry may contain
 a features list or table, a network table, an args list of extra arguments
@@ -176,6 +180,7 @@ error instead.
 """
 
 from buddelkiste.binds import ROBindConfig, RWBindConfig, bind_config, get_bind_args
+from buddelkiste.conflicts import check_launch_conflicts
 from buddelkiste.features import (
     FEATURES,
     bind_from_spec,
@@ -314,9 +319,17 @@ def run(
     bind_args = get_bind_args(binds)
 
     with (
-        feature_setup(enabled, config) as setup_args,
+        feature_setup(enabled, config) as setup_parts,
         project_config_hide_args(project_config) as hide_args,
     ):
+        setup_args = [arg for _name, part in setup_parts for arg in part]
+        check_launch_conflicts(
+            enabled=enabled,
+            config=config,
+            binds=binds,
+            setup_parts=setup_parts,
+            hide_args=hide_args,
+        )
         bwrap_args = [
             "bwrap",
             "--unshare-all",
