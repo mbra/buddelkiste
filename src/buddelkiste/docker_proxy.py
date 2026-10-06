@@ -445,18 +445,38 @@ def _reject(conn: socket.socket, status: int, message: str) -> None:
 
 
 def _relay(a: socket.socket, b: socket.socket) -> None:
-    sockets = [a, b]
+    """Bidirectional copy until both sides finish.
+
+    Docker attach/exec often half-closes the client write side right after the
+    HTTP request (readable EOF) while still reading the upgraded stream. Treat
+    that as ``SHUT_WR`` toward the peer, not as tearing down the whole relay.
+    """
+    sockets = {a, b}
     try:
-        while True:
-            readable, _, errored = select.select(sockets, [], sockets, 60.0)
-            if errored or not readable:
+        while sockets:
+            readable, _, errored = select.select(list(sockets), [], list(sockets), 60.0)
+            if errored:
                 break
+            if not readable:
+                # Idle timeout: keep waiting; attach streams can be quiet.
+                continue
             for src in readable:
-                data = src.recv(65536)
-                if not data:
-                    return
+                try:
+                    data = src.recv(65536)
+                except OSError:
+                    data = b""
                 dst = b if src is a else a
-                dst.sendall(data)
+                if not data:
+                    sockets.discard(src)
+                    try:
+                        dst.shutdown(socket.SHUT_WR)
+                    except OSError:
+                        pass
+                    continue
+                try:
+                    dst.sendall(data)
+                except OSError:
+                    return
     except OSError:
         return
 

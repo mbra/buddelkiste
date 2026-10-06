@@ -287,6 +287,42 @@ def test_build_upstream_request_closes_normal_http() -> None:
     assert "Upgrade:" not in text
 
 
+def test_relay_survives_client_write_half_close() -> None:
+    """Attach-style: client shuts write side; upstream data must still flow."""
+    import socket
+    import threading
+
+    from buddelkiste.docker_proxy import _relay
+
+    c_client, c_proxy = socket.socketpair()
+    u_proxy, u_up = socket.socketpair()
+    try:
+        def run_relay() -> None:
+            _relay(c_proxy, u_proxy)
+
+        thread = threading.Thread(target=run_relay, daemon=True)
+        thread.start()
+        # Client finished sending the HTTP request (half-close write).
+        c_client.shutdown(socket.SHUT_WR)
+        u_up.sendall(b"HTTP/1.1 101 UPGRADED\r\n\r\nok-from-proxy\n")
+        u_up.shutdown(socket.SHUT_WR)
+        data = b""
+        c_client.settimeout(2.0)
+        while True:
+            try:
+                chunk = c_client.recv(65536)
+            except TimeoutError:
+                break
+            if not chunk:
+                break
+            data += chunk
+        assert b"ok-from-proxy" in data
+        thread.join(timeout=2)
+    finally:
+        for sock in (c_client, c_proxy, u_proxy, u_up):
+            sock.close()
+
+
 def test_feature_mutex_docker_and_proxy() -> None:
     from buddelkiste.conflicts import check_feature_mutex
     from buddelkiste.features import FEATURE_NAMES
