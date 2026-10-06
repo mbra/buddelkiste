@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-from pathlib import Path
 
 import pytest
 
@@ -13,12 +12,16 @@ from buddelkiste.docker_proxy import DockerProxyPolicy, docker_proxy_setup
 pytestmark = pytest.mark.requires_docker
 
 
+def _docker_host_from_setup_args(args: list[str] | tuple[str, ...]) -> str:
+    for i, arg in enumerate(args):
+        if arg == "--setenv" and i + 2 < len(args) and args[i + 1] == "DOCKER_HOST":
+            return args[i + 2]
+    raise AssertionError(f"DOCKER_HOST missing from setup args: {args!r}")
+
+
 def test_proxy_allows_listed_image_via_docker_cli(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runtime = tmp_path / "run"
-    runtime.mkdir()
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
     monkeypatch.delenv("DOCKER_HOST", raising=False)
 
     # Use a tiny local image that should already exist on developer machines;
@@ -40,14 +43,9 @@ def test_proxy_allows_listed_image_via_docker_cli(
             pytest.skip(f"cannot pull {image}: {pull.stderr}")
 
     policy = DockerProxyPolicy(images=(image,))
-    with docker_proxy_setup(policy=policy, runtime_dir=runtime) as args:
-        # args contain --setenv DOCKER_HOST unix://...
-        host = None
-        for i, arg in enumerate(args):
-            if arg == "--setenv" and i + 2 < len(args) and args[i + 1] == "DOCKER_HOST":
-                host = args[i + 2]
-                break
-        assert host
+    # Do not pass a long pytest tmp_path as runtime_dir; AF_UNIX paths are short.
+    with docker_proxy_setup(policy=policy) as args:
+        host = _docker_host_from_setup_args(args)
         env = os.environ.copy()
         env["DOCKER_HOST"] = host
         proc = subprocess.run(
@@ -69,21 +67,13 @@ def test_proxy_allows_listed_image_via_docker_cli(
 
 
 def test_proxy_denies_unlisted_image_via_docker_cli(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runtime = tmp_path / "run"
-    runtime.mkdir()
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
     monkeypatch.delenv("DOCKER_HOST", raising=False)
 
     policy = DockerProxyPolicy(images=("alpine:3.20",))
-    with docker_proxy_setup(policy=policy, runtime_dir=runtime) as args:
-        host = None
-        for i, arg in enumerate(args):
-            if arg == "--setenv" and i + 2 < len(args) and args[i + 1] == "DOCKER_HOST":
-                host = args[i + 2]
-                break
-        assert host
+    with docker_proxy_setup(policy=policy) as args:
+        host = _docker_host_from_setup_args(args)
         env = os.environ.copy()
         env["DOCKER_HOST"] = host
         proc = subprocess.run(

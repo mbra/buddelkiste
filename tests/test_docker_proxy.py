@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import threading
 from pathlib import Path
@@ -237,6 +238,20 @@ def test_proxy_server_rejects_unknown_image(tmp_path: Path) -> None:
     finally:
         proxy.stop()
         done.set()
+
+
+def test_short_listen_socket_avoids_long_tmpdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from buddelkiste.docker_proxy import _AF_UNIX_PATH_MAX, _short_listen_socket
+
+    long_runtime = tmp_path / ("x" * 80) / "run"
+    long_runtime.mkdir(parents=True)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(long_runtime))
+    path = _short_listen_socket(long_runtime)
+    assert len(os.fspath(path).encode()) <= _AF_UNIX_PATH_MAX
+    # Prefer /tmp (or gettempdir) over the oversized runtime dir.
+    assert not str(path).startswith(str(long_runtime))
 
 
 def test_feature_mutex_docker_and_proxy() -> None:

@@ -13,6 +13,7 @@ import os
 import re
 import select
 import socket
+import tempfile
 import threading
 import tomllib
 from collections.abc import Iterator, Mapping, Sequence
@@ -573,6 +574,38 @@ class DockerProxyServer:
                 pass
 
 
+# Linux sockaddr_un.sun_path is typically 108 bytes including NUL.
+_AF_UNIX_PATH_MAX = 107
+
+
+def _short_listen_socket(runtime_dir: Path | None = None) -> Path:
+    """Return a Unix socket path that fits in ``sockaddr_un.sun_path``."""
+    pid = os.getpid()
+    name = f"bk-dp-{pid}.sock"
+    candidates: list[Path] = []
+    if runtime_dir is not None:
+        candidates.append(runtime_dir / name)
+    xdg = os.environ.get("XDG_RUNTIME_DIR")
+    if xdg:
+        candidates.append(Path(xdg) / name)
+    candidates.append(Path(tempfile.gettempdir()) / name)
+    candidates.append(Path("/tmp") / name)
+
+    for path in candidates:
+        encoded = os.fspath(path).encode()
+        if len(encoded) <= _AF_UNIX_PATH_MAX:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            return path
+
+    # Last resort: tiny name under /tmp.
+    fallback = Path("/tmp") / f"b{pid}.s"
+    if len(os.fspath(fallback).encode()) > _AF_UNIX_PATH_MAX:
+        raise click.ClickException(
+            "cannot find a short enough path for the docker-proxy Unix socket"
+        )
+    return fallback
+
+
 @contextmanager
 def docker_proxy_setup(
     *,
@@ -581,13 +614,12 @@ def docker_proxy_setup(
     runtime_dir: Path | None = None,
 ) -> Iterator[Sequence[str]]:
     """Start the proxy and yield bwrap args that expose only the filtered socket."""
-    runtime = runtime_dir or Path(os.environ["XDG_RUNTIME_DIR"])
     docker_sock = resolve_docker_socket()
     if not docker_sock.exists():
         raise click.ClickException(f"Docker socket not found at {docker_sock}")
 
     effective = policy or load_effective_policy(config=config)
-    listen = runtime / "bk-docker-proxy" / f"docker-{os.getpid()}.sock"
+    listen = _short_listen_socket(runtime_dir)
     server = DockerProxyServer(listen, docker_sock, effective)
     server.start()
     host = f"unix://{listen}"
