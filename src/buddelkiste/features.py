@@ -8,6 +8,7 @@ Bind paths may interpolate ``$VAR`` / ``${VAR}`` from the process environment.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -33,6 +34,7 @@ from buddelkiste.binds import (
 )
 
 env = os.getenv
+log = logging.getLogger(__name__)
 
 ENTRY_POINT_GROUP = "buddelkiste.features"
 
@@ -320,6 +322,11 @@ def ssh_setup() -> Iterator[Sequence[str]]:
         assert ssh_agent.socket is not None
         if ssh_key := find_sandbox_ssh_key():
             ssh_agent.add_key(ssh_key)
+        else:
+            log.warning(
+                "ssh feature enabled but no ~/.ssh/sandbox_* private key found; "
+                "agent started without keys"
+            )
         yield [
             *ROBindConfig(ssh_agent.socket),
             "--setenv",

@@ -626,8 +626,10 @@ def test_reload_policy_and_resolve_pending_edges(
 
 
 def test_clear_runtime_ignores_foreign_pid_and_bad_json(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    import logging
+
     from buddelkiste.docker_proxy import runtime_path
 
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -645,8 +647,10 @@ def test_clear_runtime_ignores_foreign_pid_and_bad_json(
     assert path.is_file()  # foreign pid left alone
 
     path.write_text("{not-json", encoding="utf-8")
-    proxy._clear_runtime()  # invalid JSON ignored
+    with caplog.at_level(logging.WARNING):
+        proxy._clear_runtime()  # invalid JSON ignored with a warning
     assert path.is_file()
+    assert "failed to clear docker-proxy runtime" in caplog.text
 
 
 def test_read_runtime_and_control_request_errors(

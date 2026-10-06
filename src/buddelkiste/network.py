@@ -343,7 +343,8 @@ def resolv_conf_nameservers(path: Path | None = None) -> list[str]:
     resolv = path or Path("/etc/resolv.conf")
     try:
         lines = resolv.read_text(encoding="utf-8").splitlines()
-    except OSError:
+    except OSError as exc:
+        log.warning("failed to read %s: %s", resolv, exc)
         return []
 
     result: list[str] = []
@@ -356,6 +357,7 @@ def resolv_conf_nameservers(path: Path | None = None) -> list[str]:
             try:
                 result.append(canonicalize_cidr(parts[1]))
             except click.ClickException:
+                log.debug("ignoring invalid nameserver entry in %s: %s", resolv, parts[1])
                 continue
     return result
 

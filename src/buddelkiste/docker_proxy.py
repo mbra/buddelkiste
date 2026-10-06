@@ -882,8 +882,8 @@ class DockerProxyServer:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 if data.get("pid") == os.getpid():
                     path.unlink()
-        except (OSError, json.JSONDecodeError):
-            pass
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning("failed to clear docker-proxy runtime file %s: %s", path, exc)
 
     def start(self) -> None:
         if self.listen_sock.exists():
@@ -921,9 +921,10 @@ class DockerProxyServer:
                 client, _ = self._server.accept()
             except TimeoutError:
                 continue
-            except OSError:
+            except OSError as exc:
                 if self._stop.is_set():
                     break
+                log.warning("docker-proxy accept failed: %s", exc)
                 continue
             thread = threading.Thread(
                 target=_handle_client,
@@ -939,9 +940,10 @@ class DockerProxyServer:
                 client, _ = self._control.accept()
             except TimeoutError:
                 continue
-            except OSError:
+            except OSError as exc:
                 if self._stop.is_set():
                     break
+                log.warning("docker-proxy control accept failed: %s", exc)
                 continue
             thread = threading.Thread(
                 target=self._handle_control_client,
@@ -1017,8 +1019,8 @@ class DockerProxyServer:
             if path.exists():
                 try:
                     path.unlink()
-                except OSError:
-                    pass
+                except OSError as exc:
+                    log.warning("failed to unlink docker-proxy socket %s: %s", path, exc)
 
 
 def _recv_json_line(conn: socket.socket, *, limit: int = 64 * 1024) -> dict[str, Any] | None:

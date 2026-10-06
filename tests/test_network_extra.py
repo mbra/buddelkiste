@@ -62,8 +62,14 @@ def test_resolve_network_rejects_bad_cli_flags() -> None:
         resolve_network({}, policy="bogus")
 
 
-def test_resolv_conf_oserror_and_bad_ip(tmp_path: Path) -> None:
-    assert resolv_conf_nameservers(tmp_path / "missing") == []
+def test_resolv_conf_oserror_and_bad_ip(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        assert resolv_conf_nameservers(tmp_path / "missing") == []
+    assert "failed to read" in caplog.text
     resolv = tmp_path / "resolv.conf"
     resolv.write_text(
         "nameserver not-an-ip\nnameserver 8.8.8.8\nnameserver 2001:db8::1\n",

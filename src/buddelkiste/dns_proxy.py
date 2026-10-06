@@ -173,15 +173,25 @@ def forward_query(query: bytes, upstreams: Sequence[str], timeout: float = 2.0) 
                 sock.sendall(payload)
                 header = _recvexact(sock, 2)
                 if header is None:
+                    log.debug("DNS upstream %s closed before response header", upstream)
                     continue
                 (length,) = struct.unpack("!H", header)
                 if length == 0 or length > 65535:
+                    log.debug("DNS upstream %s returned invalid length %s", upstream, length)
                     continue
                 data = _recvexact(sock, length)
                 if data is not None:
                     return data
+                log.debug("DNS upstream %s closed before full response body", upstream)
         except OSError as exc:
             log.debug("DNS upstream %s failed: %s", upstream, exc)
+    if upstreams:
+        log.warning(
+            "all DNS upstreams failed (%s); answering NXDOMAIN",
+            ", ".join(upstreams),
+        )
+    else:
+        log.warning("no DNS upstreams configured; answering NXDOMAIN")
     return None
 
 
@@ -233,7 +243,9 @@ class DnsProxy:
                 data, addr = self._sock.recvfrom(65535)
             except TimeoutError:
                 continue
-            except OSError:
+            except OSError as exc:
+                if not self._stop.is_set():
+                    log.warning("DNS proxy recv failed: %s", exc)
                 break
             try:
                 reply = self._handle(data)
