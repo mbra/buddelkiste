@@ -19,6 +19,11 @@ bk run
 bk list-features
 bk list-net-presets
 
+# Host-side docker-proxy policy (outside the sandbox)
+bk docker-policy show
+bk docker-policy pending
+bk docker-policy approve   # or: deny [id|image]
+
 # PATH shims for configured [executables.*] (in ~/.local/bin)
 bk shims install
 bk shims check
@@ -55,7 +60,7 @@ Toggle with CLI flags or config; see `bk list-features` for the live catalog
 | `cursor` | Cursor IDE/CLI install and state dirs |
 | `dbus` | session/system bus sockets, `DBUS_SESSION_BUS_ADDRESS` |
 | `docker` | `~/.docker`, Docker socket / `DOCKER_HOST` (conflicts with `docker-proxy`) |
-| `docker-proxy` | Filtered Docker API proxy + image allowlist (default off; conflicts with `docker`) |
+| `docker-proxy` | Filtered Docker API proxy + image allowlist (default **off**; conflicts with `docker`) |
 | `git` | `~/.gitconfig`, `~/.config/git` |
 | `google` | `/opt/google` |
 | `gui` | display, GPU, audio, fonts, related env |
@@ -130,6 +135,13 @@ allow = ["1.1.1.1/32", "api.github.com"]
 [executables.python]
 features = { python = true, git = true, gui = false }
 shim = false
+
+# Docker proxy: declare images in config, then `bk docker-policy apply`
+# (enforcement files live under ~/.config/buddelkiste/docker-proxy/).
+[docker_proxy]
+images = ["alpine:3.20", "postgres:16-alpine", "ghcr.io/example/*"]
+# on_unknown_image = "session"  # default: hold until approve/deny
+# on_unknown_image = "deny"     # immediate 403 (good for CI)
 
 # shims = false  # disable PATH shims globally (per-entry shim = true still wins)
 
@@ -270,6 +282,132 @@ After install, `bk list-features` shows the entry and its origin. Pure-TOML
 `[feature.<name>]` covers env/bind cases without a package; use Python entry
 points for custom bind logic or `setup` hooks. Config feature names must not
 collide with an existing entry point.
+
+## Docker proxy
+
+The raw `docker` feature exposes the host Docker socket. Prefer **`docker-proxy`**
+when a sandboxed tool (agent, CI helper, …) should talk to Docker without a full
+socket: the host `bk` process runs a filtered API proxy, binds only that socket
+into the sandbox, and sets `DOCKER_HOST` to it.
+
+`docker` and `docker-proxy` conflict; enable only one.
+
+### Enable
+
+```bash
+# One-off
+bk run --no-feature docker --feature docker-proxy docker version
+
+# Or in config (docker-proxy defaults to off)
+features = { docker = false, docker-proxy = true }
+
+[executables.cursor-agent]
+features = { docker = false, docker-proxy = true }
+```
+
+### Policy layers
+
+Effective policy is the merge of, in order:
+
+1. **Host store** — `~/.config/buddelkiste/docker-proxy/<project-key>.toml`
+   (per project directory / `.buddelkiste.toml` root)
+2. **Session grants** — same dir, `<project-key>.session.toml` (written by
+   `bk docker-policy approve`)
+3. **Config declaration** — optional `[docker_proxy]` in user/project config
+   (used by `apply`; also merged when present)
+
+```bash
+bk docker-policy path    # host store path for this project
+bk docker-policy show    # effective images + on_unknown_image
+bk docker-policy apply   # copy [docker_proxy] from config → host store
+bk docker-policy apply --dry-run
+```
+
+Declare images in config, then apply once (or edit the host file from `path`):
+
+```toml
+[docker_proxy]
+images = [
+  "alpine:3.20",
+  "postgres:16-*",
+  "ghcr.io/myorg/*",
+]
+# Optional; default is "session"
+# [docker_proxy.approval]
+# on_unknown_image = "deny"
+```
+
+Image patterns use shell-style globs (`fnmatch`). A pattern ending in `:*` also
+matches the untagged name (Docker’s implied `:latest`). Digests are stripped
+before matching (`repo:tag@sha256:…` → `repo:tag`).
+
+### What the proxy allows and denies
+
+Forwarded by default: ordinary Engine API traffic for allowlisted images
+(create/start/attach/pull of listed refs, `version`, `info`, …).
+
+Denied by default (403), even for allowlisted images:
+
+- Dangerous `HostConfig` — privileged, host network/PID/IPC/UTS/userns,
+  `CapAdd`, device mounts, …
+- Host bind mounts unless the source matches `allow_binds` globs in the policy
+- API categories: build, commit, swarm, plugins, session
+
+Unknown images (not on the allowlist):
+
+| `on_unknown_image` | Behaviour |
+|--------------------|-----------|
+| `session` (default) | Hold the HTTP request until you approve or deny on the **host** |
+| `deny` | Immediate 403 (suitable for CI) |
+
+### Interactive approval (host only)
+
+With `on_unknown_image = "session"` (the default), unknown images are **not**
+prompted on the sandboxed client’s TTY. Approval is an out-of-band host
+workflow so agent/CI sessions keep a clean shared terminal.
+
+**Flow**
+
+1. Inside the sandbox, a client does something that needs an unknown image
+   (e.g. `docker pull alpine:3.21` or `docker run …`).
+2. The proxy **holds** the HTTP request (the client blocks / waits). Concurrent
+   waits for the same image share one pending entry.
+3. On the host, the proxy logs the hold and (best-effort) shows a desktop
+   notification via `notify-send`, including the pending id and a ready-to-run
+   `bk docker-policy approve <id>` hint.
+4. On the **host** (another terminal, outside the sandbox), decide:
+
+```bash
+bk docker-policy pending              # id<TAB>image
+bk docker-policy approve              # if exactly one pending
+bk docker-policy approve alpine:3.21  # by image or pending id
+bk docker-policy deny deadbeef
+```
+
+5. **Approve** appends the image to the session policy file
+   (`…/<project-key>.session.toml`), unblocks waiters, and lets the original
+   create/pull continue (HostConfig / API denials still apply).
+6. **Deny** (or proxy teardown) unblocks with 403.
+
+The control socket is **not** mounted into the sandbox — `pending` /
+`approve` / `deny` only work on the host while that project’s proxy is live
+(see `…/<key>.runtime.json`).
+
+**If you miss the notification**
+
+- `notify-send` missing or failing → proxy logs a warning with the same
+  `approve` command; use `bk docker-policy pending` or the proxy logs.
+- Session grants last for that project’s proxy lifetime / session file;
+  promote durable allowlists with `[docker_proxy]` + `bk docker-policy apply`
+  (or edit the host store from `bk docker-policy path`).
+
+### Operational notes
+
+- Live proxy metadata: `~/.config/buddelkiste/docker-proxy/<key>.runtime.json`
+  (pid, control socket path). Cleared when the sandbox exits.
+- The proxy only supports `unix://` Docker sockets (`DOCKER_HOST` on the host).
+- Socket paths are kept short enough for `AF_UNIX` (including a sibling `.ctl`
+  control socket).
 
 ## Network filter dependencies
 
