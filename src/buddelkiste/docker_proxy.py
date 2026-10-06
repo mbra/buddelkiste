@@ -1037,7 +1037,7 @@ def _recv_json_line(conn: socket.socket, *, limit: int = 64 * 1024) -> dict[str,
     line = bytes(buf).split(b"\n", 1)[0]
     data = json.loads(line.decode())
     if not isinstance(data, dict):
-        raise ValueError("control message must be a JSON object")
+        raise TypeError("control message must be a JSON object")
     return data
 
 

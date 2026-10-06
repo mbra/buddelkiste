@@ -705,7 +705,7 @@ def test_recv_json_line_edge_cases() -> None:
     server, client = socket.socketpair()
     try:
         client.sendall(b"[1,2]\n")
-        with pytest.raises(ValueError, match="JSON object"):
+        with pytest.raises(TypeError, match="JSON object"):
             _recv_json_line(server)
     finally:
         server.close()
