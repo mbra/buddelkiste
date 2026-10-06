@@ -64,6 +64,7 @@ Toggle with CLI flags or config; see `bk list-features` for the live catalog
 | `node` | npm/nvm/bun paths, `BUN_INSTALL` |
 | `nvim` | `~/nvim` |
 | `python` | pip/virtualenv paths and env |
+| `rust` | shared `~/.cargo` / `~/.rustup` (or `CARGO_HOME` / `RUSTUP_HOME`) |
 | `ssh` | `~/.ssh/config` plus a dedicated agent with `~/.ssh/sandbox_*` keys |
 | `term` | `TERM`, `TERMINFO`, `COLORTERM`, `TERM_PROGRAM`, `EDITOR` |
 | `user` | `~/.local` (ro), `~/.cache` (rw) |
@@ -100,21 +101,21 @@ path) so the sandboxed command cannot read it.
 # features = { gui = false, google = false }
 features = ["git", "ssh", "python", "rust", "term", "locale", "user"]
 
-[feature.rust]
-description = "Rust toolchain directories"
+[feature.zig]
+description = "Zig toolchain cache"
 default = false
-env = ["CARGO_HOME", "RUSTUP_HOME"]
+env = ["ZIG_GLOBAL_CACHE_DIR"]
 
-[[feature.rust.binds]]
-source = "$CARGO_HOME"
+[[feature.zig.binds]]
+source = "$ZIG_GLOBAL_CACHE_DIR"
 mode = "rw"
 
-[[feature.rust.binds]]
-source = "${HOME}/.rustup"
+[[feature.zig.binds]]
+source = "${HOME}/.zig"
 mode = "ro"
 
-[[feature.rust.binds]]
-source = "${HOME}/.cargo/registry"
+[[feature.zig.binds]]
+source = "${HOME}/.cache/zig"
 mode = "overlay"   # persistent upper under $XDG_CACHE_HOME/buddelkiste/overlays/<hash>
 
 [executables.cursor-agent]
@@ -208,7 +209,7 @@ Built-ins and third-party packages register features under the
 `buddelkiste.features` entry-point group. The entry point value must be a
 `Feature` instance, or a zero-argument callable that returns one. When loaded,
 `name` and `origin` are set from the entry-point name and value
-(e.g. `rust` / `mypkg.features:RUST`).
+(e.g. `labs` / `mypkg.features:LABS`).
 
 `Feature` fields:
 
@@ -221,7 +222,7 @@ Built-ins and third-party packages register features under the
 | `binds` | `Callable[[], list]` | `lambda: []` | Zero-arg callable returning bind objects (`ROBindConfig`, `RWBindConfig`, `DevBindConfig`, overlay configs, `Tmpfs`, or raw bwrap arg tuples). Called each run. |
 | `setup` | `Callable[[], AbstractContextManager[Sequence[str]]] \| None` | `None` | Optional factory returning a context manager. Entered while the sandbox runs; its yielded sequence is appended as extra bwrap args (binds, `--setenv`, …). Use for sockets/agents that need lifecycle. |
 | `conflicts_with` | `tuple[str, ...]` | `()` | Feature names that must not be enabled together (checked before launch). |
-| `origin` | `str` | `""` | Shown in `bk list-features`. Overwritten by the entry-point value at load time (e.g. `mypkg.features:RUST`). |
+| `origin` | `str` | `""` | Shown in `bk list-features`. Overwritten by the entry-point value at load time (e.g. `mypkg.features:LABS`). |
 
 ```python
 # mypkg/features.py
@@ -233,36 +234,36 @@ from buddelkiste.binds import ROBindConfig, RWBindConfig
 from buddelkiste.features import Feature
 
 
-def rust_binds() -> list:
+def labs_binds() -> list:
     home = Path.home()
     return [
-        RWBindConfig(home / ".cargo"),
-        ROBindConfig(home / ".rustup"),
+        RWBindConfig(home / ".labs"),
+        ROBindConfig(home / ".config/labs"),
     ]
 
 
 @contextmanager
-def rust_setup() -> Iterator[Sequence[str]]:
+def labs_setup() -> Iterator[Sequence[str]]:
     # Optional: start helpers, yield extra bwrap args, clean up on exit.
     # Built-in ssh uses this pattern for a dedicated ssh-agent.
     yield []
 
 
-RUST = Feature(
-    name="rust",  # replaced by entry-point name "rust" when loaded
-    description="Rust toolchain directories",
+LABS = Feature(
+    name="labs",  # replaced by entry-point name "labs" when loaded
+    description="Lab tooling directories",
     default=False,
-    env_vars=("CARGO_HOME", "RUSTUP_HOME"),
-    binds=rust_binds,
-    setup=rust_setup,  # or omit / None
-    origin="mypkg.features:RUST",  # replaced by entry-point value when loaded
+    env_vars=("LABS_HOME",),
+    binds=labs_binds,
+    setup=labs_setup,  # or omit / None
+    origin="mypkg.features:LABS",  # replaced by entry-point value when loaded
 )
 ```
 
 ```toml
 # pyproject.toml
 [project.entry-points."buddelkiste.features"]
-rust = "mypkg.features:RUST"
+labs = "mypkg.features:LABS"
 ```
 
 After install, `bk list-features` shows the entry and its origin. Pure-TOML

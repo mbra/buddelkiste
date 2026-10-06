@@ -96,18 +96,20 @@ def test_cli_forwards_help_to_command(
 
 def test_cli_list_features(tmp_config: Path) -> None:
     tmp_config.write_text(
-        "[feature.rust]\n"
-        'description = "Rust toolchain"\n'
-        'env = ["CARGO_HOME"]\n',
+        "[feature.zig]\n"
+        'description = "Zig toolchain cache"\n'
+        'env = ["ZIG_GLOBAL_CACHE_DIR"]\n',
         encoding="utf-8",
     )
     result = CliRunner().invoke(cli, ["list-features"])
     assert result.exit_code == 0
     assert "cursor" in result.output
     assert "python" in result.output
-    assert "buddelkiste.features:CURSOR" in result.output
     assert "rust" in result.output
-    assert "config:[feature.rust]" in result.output
+    assert "buddelkiste.features:CURSOR" in result.output
+    assert "buddelkiste.features:RUST" in result.output
+    assert "zig" in result.output
+    assert "config:[feature.zig]" in result.output
 
 
 def test_cli_disables_feature_via_flag(

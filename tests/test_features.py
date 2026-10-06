@@ -22,6 +22,7 @@ from buddelkiste.features import (
     load_feature_registry,
     python_binds,
     resolve_features,
+    rust_binds,
     user_binds,
     xdg_open_binds,
 )
@@ -30,6 +31,7 @@ from buddelkiste.features import (
 def test_feature_catalog_is_topic_oriented() -> None:
     assert "cursor" in FEATURES
     assert "python" in FEATURES
+    assert "rust" in FEATURES
     assert "ssh" in FEATURES
     assert "docker" in FEATURES
     assert "docker-proxy" in FEATURES
@@ -154,42 +156,42 @@ def test_expand_bind_path_expands_tilde(
 def test_toml_custom_feature_registry_and_resolve(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    cargo = tmp_path / "cargo"
-    cargo.mkdir()
-    monkeypatch.setenv("CARGO_HOME", str(cargo))
+    zig = tmp_path / "zig"
+    zig.mkdir()
+    monkeypatch.setenv("ZIG_GLOBAL_CACHE_DIR", str(zig))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     (tmp_path / "home").mkdir()
 
     config = {
-        "features": ["rust"],
+        "features": ["zig"],
         "feature": {
-            "rust": {
-                "description": "Rust toolchain",
+            "zig": {
+                "description": "Zig toolchain cache",
                 "default": False,
-                "env": ["CARGO_HOME", "RUSTUP_HOME"],
+                "env": ["ZIG_GLOBAL_CACHE_DIR"],
                 "binds": [
-                    {"source": "$CARGO_HOME", "mode": "rw"},
-                    {"source": "${HOME}/.rustup", "mode": "ro"},
+                    {"source": "$ZIG_GLOBAL_CACHE_DIR", "mode": "rw"},
+                    {"source": "${HOME}/.zig", "mode": "ro"},
                 ],
             }
         },
     }
     registry = load_feature_registry(config)
-    assert "rust" in registry
-    assert registry["rust"].env_vars == ("CARGO_HOME", "RUSTUP_HOME")
-    assert "config:[feature.rust]" in format_features_help(config)
+    assert "zig" in registry
+    assert registry["zig"].env_vars == ("ZIG_GLOBAL_CACHE_DIR",)
+    assert "config:[feature.zig]" in format_features_help(config)
 
     enabled = resolve_features(config)
-    assert enabled["rust"] is True
+    assert enabled["zig"] is True
     assert enabled["git"] is False
 
     binds = feature_binds(enabled, config)
     sources = {getattr(b, "source", None) for b in binds}
-    assert str(cargo) in sources
-    assert str(tmp_path / "home" / ".rustup") in sources
+    assert str(zig) in sources
+    assert str(tmp_path / "home" / ".zig") in sources
 
     env_names = feature_env_var_names(enabled, config)
-    assert "CARGO_HOME" in env_names
+    assert "ZIG_GLOBAL_CACHE_DIR" in env_names
     assert "VIRTUAL_ENV" not in env_names
 
 
@@ -306,6 +308,9 @@ def test_topic_bind_helpers(
     monkeypatch.setenv("HOME", str(home))
     assert any(getattr(b, "source", None) == "/opt/cursor-agent" for b in cursor_binds())
     assert any(str(home / ".pip") == getattr(b, "source", None) for b in python_binds())
+    rust_sources = {getattr(b, "source", None) for b in rust_binds()}
+    assert str(home / ".cargo") in rust_sources
+    assert str(home / ".rustup") in rust_sources
     dbus_sources = {getattr(b, "source", None) for b in dbus_binds()}
     assert "/run/dbus/system_bus_socket" in dbus_sources
     assert str(runtime_dir / "bus") in dbus_sources
@@ -317,6 +322,33 @@ def test_topic_bind_helpers(
     user_sources = {getattr(b, "source", None) for b in user_binds()}
     assert str(home / ".local") in user_sources
     assert str(home / ".cache") in user_sources
+
+
+def test_rust_feature_binds_and_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    cargo = tmp_path / "custom-cargo"
+    rustup = tmp_path / "custom-rustup"
+    cargo.mkdir()
+    rustup.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CARGO_HOME", str(cargo))
+    monkeypatch.setenv("RUSTUP_HOME", str(rustup))
+
+    enabled = {name: False for name in FEATURE_NAMES}
+    sources_off = {getattr(b, "source", None) for b in feature_binds(enabled)}
+    assert str(cargo) not in sources_off
+    assert "CARGO_HOME" not in feature_env_var_names(enabled)
+
+    enabled["rust"] = True
+    sources_on = {getattr(b, "source", None) for b in feature_binds(enabled)}
+    assert str(cargo) in sources_on
+    assert str(rustup) in sources_on
+    names = feature_env_var_names(enabled)
+    assert "CARGO_HOME" in names
+    assert "RUSTUP_HOME" in names
 
 
 def test_dbus_feature_binds_and_env(
@@ -395,6 +427,7 @@ def test_format_features_help_lists_topics() -> None:
     text = format_features_help()
     assert "cursor" in text
     assert "python" in text
+    assert "rust" in text
     assert "gui" in text
     assert "xdg-open" in text
     assert "user" in text
@@ -403,6 +436,7 @@ def test_format_features_help_lists_topics() -> None:
     assert "default: on" in text
     assert "buddelkiste.features:CURSOR" in text
     assert "buddelkiste.features:PYTHON" in text
+    assert "buddelkiste.features:RUST" in text
 
 
 def test_entry_point_features_include_builtins() -> None:

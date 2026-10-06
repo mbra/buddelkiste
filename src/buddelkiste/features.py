@@ -168,6 +168,17 @@ def asdf_binds() -> list:
     ]
 
 
+def rust_binds() -> list:
+    """Share host cargo/rustup homes (registry, toolchains, installed bins)."""
+    home = _home()
+    cargo_home = Path(env("CARGO_HOME") or home / ".cargo")
+    rustup_home = Path(env("RUSTUP_HOME") or home / ".rustup")
+    return [
+        RWBindConfig(cargo_home),
+        RWBindConfig(rustup_home),
+    ]
+
+
 def docker_binds() -> list:
     res: list = [ROBindConfig(_home() / ".docker")]
     if docker_host := env("DOCKER_HOST"):
@@ -344,6 +355,13 @@ ASDF = Feature(
     binds=asdf_binds,
     origin="buddelkiste.features:ASDF",
 )
+RUST = Feature(
+    name="rust",
+    description="Shared cargo and rustup homes (CARGO_HOME / RUSTUP_HOME)",
+    env_vars=("CARGO_HOME", "RUSTUP_HOME"),
+    binds=rust_binds,
+    origin="buddelkiste.features:RUST",
+)
 DOCKER = Feature(
     name="docker",
     description="Docker CLI config and user daemon socket",
@@ -473,6 +491,7 @@ def _builtin_feature_fallback() -> dict[str, Feature]:
             PYTHON,
             NODE,
             ASDF,
+            RUST,
             DOCKER,
             DOCKER_PROXY,
             GIT,
