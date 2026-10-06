@@ -110,7 +110,9 @@ envvars: List of additional environment variables for the sandbox. The mandatory
 docker_proxy: Optional table used by the docker-proxy feature. Declares allowlisted
 images (and related policy) for the project. Host enforcement lives under
 ~/.config/buddelkiste/docker-proxy/; use `bk docker-policy apply` to promote the
-declaration. Mutually exclusive with the raw docker feature.
+declaration. Unknown images hold until `bk docker-policy approve` /
+`deny` when approval.on_unknown_image is "session" (the default). Mutually
+exclusive with the raw docker feature.
 
 ## Example for a ~/.config/buddelkiste/config.toml configuration
 
@@ -431,6 +433,66 @@ def docker_policy_apply(dry_run: bool) -> None:
         return
     write_policy_file(path, declaration)
     click.echo(f"Wrote {len(declaration.images)} image(s) to {path}")
+
+
+@docker_policy_group.command("pending")
+def docker_policy_pending() -> None:
+    """List image approvals currently held by a live docker-proxy.
+
+    Run this on the host (outside the sandbox); the control socket is not
+    exposed inside the bubblewrap environment.
+    """
+    from buddelkiste.docker_proxy import control_request
+
+    resp = control_request({"op": "list"})
+    if not resp.get("ok"):
+        raise click.ClickException(str(resp.get("error") or "list failed"))
+    pending = resp.get("pending") or []
+    if not pending:
+        click.echo("No pending image approvals.")
+        return
+    for item in pending:
+        click.echo(f"{item.get('id')}\t{item.get('image')}")
+
+
+@docker_policy_group.command("approve")
+@click.argument("target", required=False)
+def docker_policy_approve(target: str | None) -> None:
+    """Allow a held image for this session (unblocks the waiting Docker client).
+
+    TARGET is a pending id or image reference. When omitted and exactly one
+    request is held, that request is approved. Run on the host (outside the
+    sandbox).
+    """
+    from buddelkiste.docker_proxy import control_request
+
+    req: dict = {"op": "approve"}
+    if target is not None:
+        req["target"] = target
+    resp = control_request(req)
+    if not resp.get("ok"):
+        raise click.ClickException(str(resp.get("error") or "approve failed"))
+    click.echo(f"Approved {resp.get('image')} (id={resp.get('id')}) for this session")
+
+
+@docker_policy_group.command("deny")
+@click.argument("target", required=False)
+def docker_policy_deny(target: str | None) -> None:
+    """Deny a held image request (unblocks the waiting Docker client with 403).
+
+    TARGET is a pending id or image reference. When omitted and exactly one
+    request is held, that request is denied. Run on the host (outside the
+    sandbox).
+    """
+    from buddelkiste.docker_proxy import control_request
+
+    req: dict = {"op": "deny"}
+    if target is not None:
+        req["target"] = target
+    resp = control_request(req)
+    if not resp.get("ok"):
+        raise click.ClickException(str(resp.get("error") or "deny failed"))
+    click.echo(f"Denied {resp.get('image')} (id={resp.get('id')})")
 
 
 @cli.group("shims")

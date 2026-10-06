@@ -226,9 +226,12 @@ def test_build_upstream_injects_hijack_headers_when_missing() -> None:
 
 
 def test_handle_client_denies_and_502(tmp_path: Path) -> None:
-    from buddelkiste.docker_proxy import _handle_client
+    from buddelkiste.docker_proxy import DockerProxyServer, _handle_client
 
-    policy = DockerProxyPolicy(images=("alpine:3.20",))
+    policy = DockerProxyPolicy(images=("alpine:3.20",), on_unknown_image="deny")
+    server_obj = DockerProxyServer(
+        tmp_path / "p.sock", tmp_path / "missing.sock", policy
+    )
     server, client = socket.socketpair()
     try:
         body = json.dumps({"Image": "alpine:3.20", "HostConfig": {}}).encode()
@@ -237,7 +240,7 @@ def test_handle_client_denies_and_502(tmp_path: Path) -> None:
             + f"Content-Length: {len(body)}\r\n\r\n".encode()
             + body
         )
-        _handle_client(server, tmp_path / "missing.sock", policy)
+        _handle_client(server, tmp_path / "missing.sock", server_obj)
         resp = client.recv(65536)
         assert b"502" in resp or b"cannot connect" in resp
     finally:
@@ -254,7 +257,7 @@ def test_handle_client_denies_and_502(tmp_path: Path) -> None:
             + f"Content-Length: {len(body)}\r\n\r\n".encode()
             + body
         )
-        _handle_client(server, tmp_path / "missing.sock", policy)
+        _handle_client(server, tmp_path / "missing.sock", server_obj)
         resp = client.recv(65536)
         assert b"403" in resp
         assert b"not allowlisted" in resp
@@ -316,13 +319,16 @@ def test_short_listen_socket_fallback_when_all_long(
     assert path.as_posix().startswith("/tmp/")
 
 
-def test_handle_client_empty_request() -> None:
-    from buddelkiste.docker_proxy import _handle_client
+def test_handle_client_empty_request(tmp_path: Path) -> None:
+    from buddelkiste.docker_proxy import DockerProxyServer, _handle_client
 
+    server_obj = DockerProxyServer(
+        tmp_path / "p.sock", tmp_path / "d.sock", DockerProxyPolicy()
+    )
     server, client = socket.socketpair()
     try:
         client.close()
-        _handle_client(server, Path("/tmp/no.sock"), DockerProxyPolicy())
+        _handle_client(server, Path("/tmp/no.sock"), server_obj)
     finally:
         try:
             server.close()
@@ -427,15 +433,16 @@ def test_handle_client_logs_handler_exception(
     import logging
 
     import buddelkiste.docker_proxy as dp
-    from buddelkiste.docker_proxy import _handle_client
+    from buddelkiste.docker_proxy import DockerProxyServer, _handle_client
 
     monkeypatch.setattr(dp, "_MAX_HTTP_HEADERS", 64)
     policy = DockerProxyPolicy(images=("alpine:3.20",))
+    server_obj = DockerProxyServer(tmp_path / "p.sock", tmp_path / "no.sock", policy)
     server, client = socket.socketpair()
     try:
         client.sendall(b"GET / HTTP/1.1\r\nX: " + b"z" * 80)
         with caplog.at_level(logging.ERROR):
-            _handle_client(server, tmp_path / "no.sock", policy)
+            _handle_client(server, tmp_path / "no.sock", server_obj)
         assert "docker-proxy client handler failed" in caplog.text
     finally:
         try:

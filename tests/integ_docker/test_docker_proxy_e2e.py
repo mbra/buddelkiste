@@ -73,7 +73,7 @@ def test_proxy_denies_unlisted_image_via_docker_cli(
 ) -> None:
     monkeypatch.delenv("DOCKER_HOST", raising=False)
 
-    policy = DockerProxyPolicy(images=(ALPINE,))
+    policy = DockerProxyPolicy(images=(ALPINE,), on_unknown_image="deny")
     with docker_proxy_setup(policy=policy) as args:
         host = _docker_host_from_setup_args(args)
         env = os.environ.copy()
@@ -154,7 +154,11 @@ def test_proxy_loads_policy_from_host_store(
     from buddelkiste.docker_proxy import host_policy_path, project_policy_key
 
     key = project_policy_key()
-    write_policy_file(host_policy_path(key), DockerProxyPolicy(images=(ALPINE,)))
+    # deny so the unlisted busybox run fails immediately (session would hold).
+    write_policy_file(
+        host_policy_path(key),
+        DockerProxyPolicy(images=(ALPINE,), on_unknown_image="deny"),
+    )
 
     with docker_proxy_setup() as args:  # loads effective policy from host store
         host = _docker_host_from_setup_args(args)

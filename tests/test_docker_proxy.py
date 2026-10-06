@@ -215,7 +215,7 @@ def test_proxy_server_rejects_unknown_image(tmp_path: Path) -> None:
     listen = tmp_path / "proxy.sock"
     # Upstream should not be contacted; still bind a socket so connect would work.
     done, _upstream = _start_fake_docker(docker_sock)
-    policy = DockerProxyPolicy(images=("alpine:3.20",))
+    policy = DockerProxyPolicy(images=("alpine:3.20",), on_unknown_image="deny")
     proxy = DockerProxyServer(listen, docker_sock, policy)
     proxy.start()
     try:
@@ -235,6 +235,131 @@ def test_proxy_server_rejects_unknown_image(tmp_path: Path) -> None:
         client.close()
         assert b"403" in resp
         assert b"not allowlisted" in resp
+    finally:
+        proxy.stop()
+        done.set()
+
+
+def test_proxy_holds_unknown_image_until_approve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    from buddelkiste.docker_proxy import control_request
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    docker_sock = tmp_path / "docker.sock"
+    listen = tmp_path / "proxy.sock"
+    done, _upstream = _start_fake_docker(docker_sock)
+    policy = DockerProxyPolicy(images=("alpine:3.20",), on_unknown_image="session")
+    proxy = DockerProxyServer(listen, docker_sock, policy, policy_key="testproj")
+    proxy.start()
+    try:
+        body = json.dumps({"Image": "evil:latest", "HostConfig": {}}).encode()
+        req = (
+            b"POST /containers/create HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            + f"Content-Length: {len(body)}\r\n".encode()
+            + b"\r\n"
+            + body
+        )
+
+        result: dict[str, bytes] = {}
+
+        def client_thread() -> None:
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.settimeout(5.0)
+            client.connect(str(listen))
+            client.sendall(req)
+            result["resp"] = client.recv(65536)
+            client.close()
+
+        thread = threading.Thread(target=client_thread, daemon=True)
+        thread.start()
+
+        for _ in range(50):
+            listed = control_request({"op": "list"}, key="testproj")
+            if listed.get("pending"):
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("pending approval never appeared")
+
+        assert thread.is_alive()
+
+        approved = control_request(
+            {"op": "approve", "target": "evil:latest"}, key="testproj"
+        )
+        assert approved.get("ok") is True
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+        assert b"200 OK" in result["resp"]
+    finally:
+        proxy.stop()
+        done.set()
+
+
+def test_proxy_holds_unknown_image_until_deny(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    from buddelkiste.docker_proxy import control_request
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    docker_sock = tmp_path / "docker.sock"
+    listen = tmp_path / "proxy.sock"
+    done, _upstream = _start_fake_docker(docker_sock)
+    policy = DockerProxyPolicy(on_unknown_image="session")
+    proxy = DockerProxyServer(listen, docker_sock, policy, policy_key="testproj")
+    proxy.start()
+    try:
+        body = json.dumps({"Image": "evil:latest", "HostConfig": {}}).encode()
+        req = (
+            b"POST /containers/create HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            + f"Content-Length: {len(body)}\r\n".encode()
+            + b"\r\n"
+            + body
+        )
+        result: dict[str, bytes] = {}
+
+        def client_thread() -> None:
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.settimeout(5.0)
+            client.connect(str(listen))
+            client.sendall(req)
+            result["resp"] = client.recv(65536)
+            client.close()
+
+        thread = threading.Thread(target=client_thread, daemon=True)
+        thread.start()
+
+        for _ in range(50):
+            listed = control_request({"op": "list"}, key="testproj")
+            if listed.get("pending"):
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("pending approval never appeared")
+
+        denied = control_request({"op": "deny"}, key="testproj")
+        assert denied.get("ok") is True
+        thread.join(timeout=3)
+        assert b"403" in result["resp"]
+        assert b"approval denied" in result["resp"]
     finally:
         proxy.stop()
         done.set()
@@ -373,6 +498,10 @@ def test_docker_policy_apply_and_mutex_cli(
     path = runner.invoke(cli, ["docker-policy", "path"])
     assert path.exit_code == 0
     assert "docker-proxy" in path.output
+
+    pending = runner.invoke(cli, ["docker-policy", "pending"])
+    assert pending.exit_code != 0
+    assert "no live docker-proxy" in pending.output.lower() or "missing" in pending.output
 
     monkeypatch.setattr(
         "buddelkiste.cli.get_binds",
