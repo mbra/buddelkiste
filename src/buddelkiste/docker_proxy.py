@@ -461,6 +461,44 @@ def _relay(a: socket.socket, b: socket.socket) -> None:
         return
 
 
+def _is_hijack_request(headers: Mapping[str, str]) -> bool:
+    upgrade = headers.get("Upgrade", "")
+    connection = headers.get("Connection", "")
+    return bool(upgrade) or "upgrade" in connection.lower()
+
+
+def _build_upstream_request(
+    method: str,
+    path: str,
+    headers: Mapping[str, str],
+    body: bytes,
+) -> bytes:
+    """Rebuild a client request for the Docker daemon.
+
+    Preserve ``Upgrade`` / ``Connection: Upgrade`` so attach/exec hijacking
+    still yields ``101 UPGRADED`` instead of a plain ``200`` with no stream.
+    """
+    hijack = _is_hijack_request(headers)
+    header_lines = [f"{method} {path} HTTP/1.1"]
+    skip = {"Content-Length", "Host"}
+    if not hijack:
+        skip.add("Connection")
+    for key, value in headers.items():
+        if key in skip:
+            continue
+        header_lines.append(f"{key}: {value}")
+    header_lines.append("Host: localhost")
+    header_lines.append(f"Content-Length: {len(body)}")
+    if hijack:
+        if "Upgrade" not in headers:
+            header_lines.append("Upgrade: tcp")
+        if "upgrade" not in headers.get("Connection", "").lower():
+            header_lines.append("Connection: Upgrade")
+    else:
+        header_lines.append("Connection: close")
+    return ("\r\n".join(header_lines) + "\r\n\r\n").encode("latin-1") + body
+
+
 def _handle_client(
     client: socket.socket,
     docker_sock: Path,
@@ -485,18 +523,9 @@ def _handle_client(
             return
 
         try:
-            # Rebuild request; drop hop-by-hop headers that confuse reuse.
-            header_lines = [f"{method} {path} HTTP/1.1"]
-            skip = {"Content-Length", "Connection", "Host"}
-            for key, value in headers.items():
-                if key in skip:
-                    continue
-                header_lines.append(f"{key}: {value}")
-            header_lines.append("Host: localhost")
-            header_lines.append(f"Content-Length: {len(body)}")
-            header_lines.append("Connection: close")
-            raw = ("\r\n".join(header_lines) + "\r\n\r\n").encode("latin-1") + body
-            upstream.sendall(raw)
+            upstream.sendall(_build_upstream_request(method, path, headers, body))
+            client.settimeout(None)
+            upstream.settimeout(None)
             _relay(client, upstream)
         finally:
             upstream.close()

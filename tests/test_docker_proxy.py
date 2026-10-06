@@ -254,6 +254,39 @@ def test_short_listen_socket_avoids_long_tmpdir(
     assert not str(path).startswith(str(long_runtime))
 
 
+def test_build_upstream_request_preserves_hijack_headers() -> None:
+    from buddelkiste.docker_proxy import _build_upstream_request
+
+    raw = _build_upstream_request(
+        "POST",
+        "/v1.45/containers/abc/attach?stream=1&stdout=1",
+        {
+            "Upgrade": "tcp",
+            "Connection": "Upgrade",
+            "Content-Type": "application/vnd.docker.raw-stream",
+        },
+        b"",
+    )
+    text = raw.decode("latin-1")
+    assert "Upgrade: tcp" in text
+    assert "Connection: Upgrade" in text
+    assert "Connection: close" not in text
+
+
+def test_build_upstream_request_closes_normal_http() -> None:
+    from buddelkiste.docker_proxy import _build_upstream_request
+
+    raw = _build_upstream_request(
+        "GET",
+        "/_ping",
+        {"User-Agent": "test"},
+        b"",
+    )
+    text = raw.decode("latin-1")
+    assert "Connection: close" in text
+    assert "Upgrade:" not in text
+
+
 def test_feature_mutex_docker_and_proxy() -> None:
     from buddelkiste.conflicts import check_feature_mutex
     from buddelkiste.features import FEATURE_NAMES
