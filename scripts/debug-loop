@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Watch ``debug.log`` with Linux inotify; dump contents on each rewrite.
+
+Usage (from the repo root)::
+
+    uv run python scripts/debug-loop
+    # elsewhere (host shell, outside the agent sandbox)::
+    pytest … 2>&1 | tee debug.log
+
+Prints a banner and the full file body whenever the file is closed after a
+write (or atomically replaced), so an agent can ``AwaitShell`` /
+``notify_on_output`` on the banner without re-prompting.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ctypes
+import ctypes.util
+import os
+import select
+import sys
+import time
+from pathlib import Path
+
+# Linux inotify constants
+IN_CLOSE_WRITE = 0x00000008
+IN_MOVED_TO = 0x00000080
+IN_CREATE = 0x00000100
+IN_MODIFY = 0x00000002
+IN_DELETE_SELF = 0x00000400
+IN_MOVE_SELF = 0x00000800
+
+_EVENT_SIZE = 16  # sizeof(struct inotify_event) without name
+_NAME_MAX = 1024
+
+
+class _InotifyEvent(ctypes.Structure):
+    _fields_ = [
+        ("wd", ctypes.c_int),
+        ("mask", ctypes.c_uint32),
+        ("cookie", ctypes.c_uint32),
+        ("len", ctypes.c_uint32),
+    ]
+
+
+def _libc() -> ctypes.CDLL:
+    lib = ctypes.util.find_library("c")
+    if not lib:
+        raise RuntimeError("libc not found")
+    return ctypes.CDLL(lib, use_errno=True)
+
+
+def _dump(path: Path, reason: str) -> None:
+    print(f"\n===== DEBUG.LOG UPDATE ({reason}) =====", flush=True)
+    print(f"path={path} mtime={path.stat().st_mtime if path.exists() else 'missing'}", flush=True)
+    print("----- begin debug.log -----", flush=True)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print(f"<unreadable: {exc}>", flush=True)
+    else:
+        if not text:
+            print("<empty>", flush=True)
+        else:
+            # Avoid huge dumps flooding the agent; keep a generous but finite tail.
+            if len(text) > 200_000:
+                print(text[-200_000:], end="" if text.endswith("\n") else "\n", flush=True)
+                print("----- truncated to last 200k chars -----", flush=True)
+            else:
+                print(text, end="" if text.endswith("\n") else "\n", flush=True)
+    print("----- end debug.log -----", flush=True)
+    print(f"===== END DEBUG.LOG UPDATE ({reason}) =====\n", flush=True)
+
+
+def watch(path: Path) -> int:
+    libc = _libc()
+    libc.inotify_init.restype = ctypes.c_int
+    libc.inotify_add_watch.restype = ctypes.c_int
+    libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+    libc.read.restype = ctypes.c_ssize_t
+
+    fd = libc.inotify_init()
+    if fd < 0:
+        errno = ctypes.get_errno()
+        raise OSError(errno, f"inotify_init failed: {os.strerror(errno)}")
+
+    directory = path.parent if path.parent.as_posix() != "" else Path(".")
+    directory.mkdir(parents=True, exist_ok=True)
+    # Only CLOSE_WRITE / MOVED_TO: `tee debug.log` (and shell `>`) keep the
+    # fd open for the whole run and fire MODIFY on every write; dumping those
+    # floods mid-run. CREATE alone is also noisy (truncate+open).
+    mask = IN_CLOSE_WRITE | IN_MOVED_TO
+    wd = libc.inotify_add_watch(fd, os.fsencode(directory), mask)
+    if wd < 0:
+        errno = ctypes.get_errno()
+        raise OSError(errno, f"inotify_add_watch failed: {os.strerror(errno)}")
+
+    target_name = path.name
+    print(f"watching {path} (dir={directory}) for rewrites…", flush=True)
+    if path.exists():
+        _dump(path, "initial")
+
+    buf = ctypes.create_string_buffer(_EVENT_SIZE + _NAME_MAX)
+    debounce_until = 0.0
+    try:
+        while True:
+            readable, _, _ = select.select([fd], [], [], 1.0)
+            if not readable:
+                continue
+            nbytes = libc.read(fd, buf, len(buf))
+            if nbytes < 0:
+                errno = ctypes.get_errno()
+                raise OSError(errno, f"inotify read failed: {os.strerror(errno)}")
+            offset = 0
+            hit = False
+            reason = "write"
+            while offset + _EVENT_SIZE <= nbytes:
+                event = _InotifyEvent.from_buffer_copy(buf.raw[offset : offset + _EVENT_SIZE])
+                offset += _EVENT_SIZE
+                name = ""
+                if event.len:
+                    raw_name = buf.raw[offset : offset + event.len]
+                    offset += event.len
+                    name = raw_name.split(b"\0", 1)[0].decode("utf-8", "replace")
+                if name and name != target_name:
+                    continue
+                if event.mask & (IN_CLOSE_WRITE | IN_MOVED_TO):
+                    hit = True
+                    if event.mask & IN_MOVED_TO:
+                        reason = "moved_to"
+                    else:
+                        reason = "close_write"
+            if not hit:
+                continue
+            # Coalesce close+rename bursts from atomic rewrites.
+            now = time.monotonic()
+            if now < debounce_until:
+                continue
+            debounce_until = now + 0.4
+            time.sleep(0.1)  # let the writer finish flushing
+            if path.exists():
+                _dump(path, reason)
+            else:
+                print(f"\n===== DEBUG.LOG UPDATE ({reason}): file missing =====\n", flush=True)
+    except KeyboardInterrupt:
+        print("stopped.", flush=True)
+        return 0
+    finally:
+        os.close(fd)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default="debug.log",
+        type=Path,
+        help="file to watch (default: debug.log)",
+    )
+    args = parser.parse_args(argv)
+    return watch(args.path.resolve())
+
+
+if __name__ == "__main__":
+    sys.exit(main())
