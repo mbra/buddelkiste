@@ -35,7 +35,12 @@ Use `bk list-features` to print the catalog (includes module paths).
 
 Config may set features globally and per executable (matched by path or
 basename of the command being started). A list selects exactly those features;
-a table applies true/false overrides.
+a table applies true/false overrides. Per-executable config may also set
+network and args (extra arguments appended to the command).
+
+For each configured executable, `bk shims install` can place a PATH wrapper
+in $XDG_BIN_HOME (~/.local/bin) that runs the real binary via `bk run`.
+Use `bk shims check` to detect originals that shadow those shims on PATH.
 
 
 # Network
@@ -71,8 +76,13 @@ source/target/mode tables). Bind paths may use $VAR or ${VAR}. Packages
 may also register features via the buddelkiste.features entry-point group.
 
 executables: Table keyed by executable path or basename. Each entry may contain
-a features list or table, and/or a network table, applied when that executable
-is started.
+a features list or table, a network table, an args list of extra arguments
+appended to the command, and/or a shim boolean (override the global shims
+toggle), applied when that executable is started.
+
+shims: Global boolean (default true). When true, `bk shims install` creates
+PATH wrappers for configured executables; set false to disable unless an
+entry sets shim = true. Per-executable shim overrides this default.
 
 network: Global network settings (mode, policy, allow, deny, deny_presets).
 Optional [network.presets] defines custom named deny lists. See example.
@@ -127,6 +137,7 @@ envvars: List of additional environment variables for the sandbox. The mandatory
 \b
   [executables.cursor-agent]
   features = ["cursor", "git", "ssh", "gui"]
+  args = ["--force"]
 
 \b
   [executables.cursor-agent.network]
@@ -137,6 +148,10 @@ envvars: List of additional environment variables for the sandbox. The mandatory
 \b
   [executables.python]
   features = ["python", "git"]
+  shim = false
+
+\b
+  # shims = false  # disable PATH shims globally (per-entry shim=true still wins)
 
 \b
   [[binds]]
@@ -166,6 +181,7 @@ from buddelkiste.features import (
     feature_env_var_names,
     feature_setup,
     format_features_help,
+    lookup_executable_config,
     resolve_features,
 )
 from buddelkiste.network import (
@@ -173,6 +189,13 @@ from buddelkiste.network import (
     load_deny_preset_registry,
     resolve_network,
     run_bwrap,
+)
+from buddelkiste.shims import (
+    check_shims,
+    install_shims_from_config,
+    shim_decisions_from_config,
+    shim_names_from_config,
+    xdg_bin_dir,
 )
 
 env = os.getenv
@@ -265,6 +288,7 @@ def run(
     project_config = find_project_config()
     command = resolve_launch_command(args)
     executable = command_executable(command, args)
+    command = append_executable_args(command, config, executable)
     enabled = resolve_features(
         config,
         executable=executable,
@@ -326,6 +350,70 @@ def list_features() -> None:
 def list_net_presets() -> None:
     """List built-in and config network deny presets."""
     click.echo(format_deny_presets_help(load_deny_preset_registry(load_config())))
+
+
+@cli.group("shims")
+def shims_group() -> None:
+    """Install and verify PATH shims for configured executables.
+
+    For each key under ``[executables.<name>]`` with shimming enabled, a small
+    ``sh`` wrapper is placed in ``$XDG_BIN_HOME`` (default ``~/.local/bin``)
+    that runs ``bk run <real-binary>`` with the caller's arguments. Control
+    with top-level ``shims = true/false`` (default true) and per-entry
+    ``shim = true/false``. Shims carry a ``# buddelkiste-shim:`` marker so
+    ``install`` can refresh or remove our own files without clobbering
+    unrelated binaries of the same name.
+    """
+
+
+@shims_group.command("install")
+def shims_install() -> None:
+    """Create or update PATH shims for configured executables."""
+    config = load_config()
+    decisions = shim_decisions_from_config(config)
+    if not decisions:
+        click.echo("No [executables] entries in config; nothing to install.", err=True)
+        return
+
+    bin_dir = xdg_bin_dir()
+    results = install_shims_from_config(config, bin_dir=bin_dir)
+    if not results:
+        click.echo("All configured executables have shimming disabled; nothing to do.")
+        return
+    for result in results:
+        click.echo(f"{result.action:9} {result.path}")
+    skipped = [r for r in results if r.action == "skipped"]
+    if skipped:
+        click.echo(
+            f"Left {len(skipped)} existing non-shim file(s) untouched "
+            "(remove or rename them, then re-run).",
+            err=True,
+        )
+
+
+@shims_group.command("check")
+def shims_check() -> None:
+    """Warn if originals on PATH would bypass installed shims."""
+    config = load_config()
+    decisions = shim_decisions_from_config(config)
+    if not decisions:
+        click.echo("No [executables] entries in config; nothing to check.", err=True)
+        return
+
+    names = shim_names_from_config(config)
+    if not names:
+        click.echo("All configured executables have shimming disabled; nothing to check.")
+        return
+
+    issues = check_shims(names, bin_dir=xdg_bin_dir())
+    if not issues:
+        click.echo(f"OK: {len(names)} shim(s) intercept PATH correctly.")
+        return
+
+    for issue in issues:
+        prefix = "warning" if issue.name == "*" else f"warning ({issue.name})"
+        click.echo(f"{prefix}: {issue.message}", err=True)
+    raise SystemExit(1)
 
 
 def load_toml_file(path: Path) -> dict:
@@ -560,6 +648,24 @@ def command_executable(command: list[str], args: list[str]) -> str | None:
     return command[0]
 
 
+def append_executable_args(
+    command: list[str],
+    config: dict,
+    executable: str | None,
+) -> list[str]:
+    """Append ``executables.<name>.args`` to the command, if configured."""
+    exec_cfg = lookup_executable_config(config, executable)
+    if not exec_cfg or "args" not in exec_cfg:
+        return command
+
+    extra = exec_cfg["args"]
+    if not isinstance(extra, list) or not all(isinstance(arg, str) for arg in extra):
+        raise click.ClickException(
+            f"executables args for {executable!r} must be a list of strings"
+        )
+    return [*command, *extra]
+
+
 def log_cmdline(cmdline):
     logging.debug("Running:")
     group = [cmdline[0]]
@@ -592,6 +698,7 @@ __all__ = [
     "TmpOverlayBindConfig",
     "Tmpfs",
     "add_bind_to_config",
+    "append_executable_args",
     "bind_config",
     "cli",
     "ensure_cwd_in_sandbox",

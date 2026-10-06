@@ -19,6 +19,10 @@ bk run
 bk list-features
 bk list-net-presets
 
+# PATH shims for configured [executables.*] (in ~/.local/bin)
+bk shims install
+bk shims check
+
 # Topic features (all on by default)
 bk run --no-feature gui --no-feature google cursor-agent
 bk run --feature python --feature ssh python myscript.py
@@ -114,6 +118,7 @@ mode = "overlay"   # persistent upper under $XDG_CACHE_HOME/buddelkiste/overlays
 
 [executables.cursor-agent]
 features = ["cursor", "git", "ssh", "gui", "dbus", "xdg-open", "term"]
+args = ["--force"]
 
 [executables.cursor-agent.network]
 mode = "filter"
@@ -122,6 +127,9 @@ allow = ["1.1.1.1/32", "api.github.com"]
 
 [executables.python]
 features = { python = true, git = true, gui = false }
+shim = false
+
+# shims = false  # disable PATH shims globally (per-entry shim = true still wins)
 
 [[binds]]
 source = "/path/to/directory"
@@ -162,6 +170,36 @@ Paths in `source`, `target`, and `overlay:<path>` may use `$VAR` / `${VAR}`.
 The current working directory must be visible inside the sandbox. If it is not
 covered by any bind, `bk` asks whether to whitelist it for this run or
 permanently (appends a `[[binds]]` entry). Non-interactively it errors instead.
+
+### PATH shims
+
+For each `[executables.<name>]` entry with shimming enabled, `bk shims install`
+writes a small `sh` wrapper into `$XDG_BIN_HOME` (default `~/.local/bin`). The
+shim resolves the real binary (skipping its own directory) and runs
+`bk run <real> "$@"`. Shims include a `# buddelkiste-shim:` marker so later
+installs can refresh our own files without overwriting unrelated binaries.
+
+Toggle with a global `shims` boolean (default `true`) and optional per-entry
+`shim = true/false` overrides. Disabled entries remove a managed shim on the
+next `install`.
+
+```toml
+shims = true
+
+[executables.cursor-agent]
+features = ["cursor"]
+
+[executables.python]
+shim = false
+```
+
+```bash
+bk shims install   # create/update/remove shims per config
+bk shims check     # warn if an original binary appears earlier on PATH
+```
+
+Ensure `~/.local/bin` is early on your `PATH`. `bk shims check` exits non-zero
+when something would bypass the sandbox.
 
 ### Python features (entry points)
 

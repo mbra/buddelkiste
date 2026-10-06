@@ -145,6 +145,23 @@ def test_cli_uses_per_executable_features(
     assert "DOCKER_HOST" not in fake_bwrap["args"]
 
 
+def test_cli_appends_per_executable_args(
+    prepared_cwd: Path,
+    tmp_config: Path,
+    fake_bwrap,
+) -> None:
+    tmp_config.write_text(
+        '[executables."/bin/echo"]\n'
+        'args = ["from-config"]\n',
+        encoding="utf-8",
+    )
+    result = CliRunner().invoke(
+        cli, ["run", "--no-feature", "ssh", "/bin/echo", "hello"]
+    )
+    assert result.exit_code == 0, result.output
+    assert fake_bwrap["args"][-4:] == ["--", "/bin/echo", "hello", "from-config"]
+
+
 def test_cli_network_filter_flags(
     prepared_cwd: Path,
     fake_bwrap,
