@@ -54,7 +54,8 @@ Toggle with CLI flags or config; see `bk list-features` for the live catalog
 | `asdf` | `~/.asdf`, `~/.tool-versions`, `ASDF_DIR` |
 | `cursor` | Cursor IDE/CLI install and state dirs |
 | `dbus` | session/system bus sockets, `DBUS_SESSION_BUS_ADDRESS` |
-| `docker` | `~/.docker`, Docker socket / `DOCKER_HOST` |
+| `docker` | `~/.docker`, Docker socket / `DOCKER_HOST` (conflicts with `docker-proxy`) |
+| `docker-proxy` | Filtered Docker API proxy + image allowlist (default off; conflicts with `docker`) |
 | `git` | `~/.gitconfig`, `~/.config/git` |
 | `google` | `/opt/google` |
 | `gui` | display, GPU, audio, fonts, related env |
@@ -219,6 +220,7 @@ Built-ins and third-party packages register features under the
 | `env_vars` | `tuple[str, ...]` | `()` | Host env var names to forward into the sandbox when the feature is on. |
 | `binds` | `Callable[[], list]` | `lambda: []` | Zero-arg callable returning bind objects (`ROBindConfig`, `RWBindConfig`, `DevBindConfig`, overlay configs, `Tmpfs`, or raw bwrap arg tuples). Called each run. |
 | `setup` | `Callable[[], AbstractContextManager[Sequence[str]]] \| None` | `None` | Optional factory returning a context manager. Entered while the sandbox runs; its yielded sequence is appended as extra bwrap args (binds, `--setenv`, …). Use for sockets/agents that need lifecycle. |
+| `conflicts_with` | `tuple[str, ...]` | `()` | Feature names that must not be enabled together (checked before launch). |
 | `origin` | `str` | `""` | Shown in `bk list-features`. Overwritten by the entry-point value at load time (e.g. `mypkg.features:RUST`). |
 
 ```python
@@ -281,9 +283,10 @@ nftables allow sets from resolved A/AAAA records. Nameserver IPs from
 ```bash
 uv sync --group dev
 uv run bk --help
-uv run pytest                 # unit + nested-safe integ + coverage; TUN e2e skipped if unavailable
+uv run pytest                 # unit + nested-safe integ + coverage; TUN/docker e2e skipped if unavailable
 uv run pytest -m integration  # real bwrap host/none + nested nft
 uv run pytest -m requires_tun # filter/pasta e2e (needs /dev/net/tun)
+uv run pytest -m requires_docker  # docker-proxy e2e (host Docker; skipped inside bwrap)
 ```
 
 Integration layout:
@@ -291,3 +294,4 @@ Integration layout:
 - `tests/` — unit/contract tests (mocked subprocess where needed)
 - `tests/integ/` — nested-safe real `bwrap` (`host`/`none`), binds/env isolation, nested `nft` + DNS proxy/`nft add element`/`UDP/53` redirect against real tools
 - `tests/integ_net/` — filter-mode e2e via pasta/slirp (allow/deny IP & host, guest caps); skipped without `/dev/net/tun`
+- `tests/integ_docker/` — docker-proxy e2e against a real Docker engine; skipped inside bwrap sandboxes or without Docker

@@ -13,7 +13,6 @@ from buddelkiste.features import (
     clear_feature_caches,
     cursor_binds,
     dbus_binds,
-    enabled_feature_names,
     expand_bind_path,
     feature_binds,
     feature_env_var_names,
@@ -32,6 +31,8 @@ def test_feature_catalog_is_topic_oriented() -> None:
     assert "cursor" in FEATURES
     assert "python" in FEATURES
     assert "ssh" in FEATURES
+    assert "docker" in FEATURES
+    assert "docker-proxy" in FEATURES
     assert "dbus" in FEATURES
     assert "xdg-open" in FEATURES
     assert "user" in FEATURES
@@ -46,8 +47,11 @@ def test_feature_catalog_is_topic_oriented() -> None:
 
 def test_resolve_features_defaults_all_enabled() -> None:
     enabled = resolve_features({})
-    assert all(enabled.values())
-    assert enabled_feature_names(enabled) == list(FEATURE_NAMES)
+    registry = load_feature_registry({})
+    for name, feature in registry.items():
+        assert enabled[name] is feature.default
+    assert enabled["docker-proxy"] is False
+    assert enabled["docker"] is True
 
 
 def test_resolve_features_config_table_and_cli_precedence() -> None:

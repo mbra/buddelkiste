@@ -180,6 +180,15 @@ def docker_binds() -> list:
     return res
 
 
+@contextmanager
+def docker_proxy_feature_setup() -> Iterator[Sequence[str]]:
+    from buddelkiste.cli import load_config
+    from buddelkiste.docker_proxy import docker_proxy_setup
+
+    with docker_proxy_setup(config=load_config()) as args:
+        yield args
+
+
 def git_binds() -> list:
     home = _home()
     return [
@@ -340,7 +349,17 @@ DOCKER = Feature(
     description="Docker CLI config and user daemon socket",
     env_vars=("DOCKER_HOST",),
     binds=docker_binds,
+    conflicts_with=("docker-proxy",),
     origin="buddelkiste.features:DOCKER",
+)
+DOCKER_PROXY = Feature(
+    name="docker-proxy",
+    description="Filtered Docker API proxy with image allowlist (not raw socket)",
+    default=False,
+    binds=lambda: [ROBindConfig(_home() / ".docker")],
+    setup=docker_proxy_feature_setup,
+    conflicts_with=("docker",),
+    origin="buddelkiste.features:DOCKER_PROXY",
 )
 GIT = Feature(
     name="git",
@@ -455,6 +474,7 @@ def _builtin_feature_fallback() -> dict[str, Feature]:
             NODE,
             ASDF,
             DOCKER,
+            DOCKER_PROXY,
             GIT,
             SSH,
             JAVA,

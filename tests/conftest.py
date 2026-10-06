@@ -87,3 +87,17 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers", "requires_outbound: needs outbound TCP to 1.1.1.1:443"
     )
+    config.addinivalue_line(
+        "markers",
+        "requires_docker: needs host Docker daemon; skipped inside bwrap sandboxes",
+    )
+
+
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    if item.get_closest_marker("requires_docker"):
+        from tests.probes import has_docker, in_bwrap_sandbox
+
+        if in_bwrap_sandbox():
+            pytest.skip("docker e2e requires a host (not bwrap) environment")
+        if not has_docker():
+            pytest.skip("docker daemon / CLI not available")

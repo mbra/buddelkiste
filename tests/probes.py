@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from functools import cache
@@ -100,3 +101,40 @@ def has_outbound_network() -> bool:
             return True
     except OSError:
         return False
+
+
+@cache
+def in_bwrap_sandbox() -> bool:
+    """True when PID 1 is bubblewrap (nested / agent sandbox)."""
+    try:
+        cmdline = Path("/proc/1/cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return False
+    if not cmdline or not cmdline[0]:
+        return False
+    return Path(os.fsdecode(cmdline[0])).name == "bwrap"
+
+
+@cache
+def has_docker() -> bool:
+    """True when the Docker CLI can talk to a local unix engine socket."""
+    if shutil.which("docker") is None:
+        return False
+    sock = Path("/var/run/docker.sock")
+    host = os.environ.get("DOCKER_HOST", "")
+    if host.startswith("unix://"):
+        sock = Path(host.removeprefix("unix://"))
+    elif host:
+        return False
+    if not sock.exists():
+        return False
+    try:
+        proc = subprocess.run(
+            ["docker", "info"],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0

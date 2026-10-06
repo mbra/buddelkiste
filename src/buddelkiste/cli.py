@@ -107,6 +107,11 @@ envvars: List of additional environment variables for the sandbox. The mandatory
 "name" key gives the name of the variable. The value can be specified in the
 "value" key. If no value is given, it is taken from the process environment.
 
+docker_proxy: Optional table used by the docker-proxy feature. Declares allowlisted
+images (and related policy) for the project. Host enforcement lives under
+~/.config/buddelkiste/docker-proxy/; use `bk docker-policy apply` to promote the
+declaration. Mutually exclusive with the raw docker feature.
+
 ## Example for a ~/.config/buddelkiste/config.toml configuration
 
 \b
@@ -365,6 +370,67 @@ def list_features() -> None:
 def list_net_presets() -> None:
     """List built-in and config network deny presets."""
     click.echo(format_deny_presets_help(load_deny_preset_registry(load_config())))
+
+
+@cli.group("docker-policy")
+def docker_policy_group() -> None:
+    """Show and apply host-side docker-proxy allowlists."""
+
+
+@docker_policy_group.command("path")
+def docker_policy_path() -> None:
+    """Print the host policy file path for the current project."""
+    from buddelkiste.docker_proxy import host_policy_path, project_policy_key
+
+    key = project_policy_key()
+    click.echo(host_policy_path(key))
+
+
+@docker_policy_group.command("show")
+def docker_policy_show() -> None:
+    """Show the effective docker-proxy policy for the current project."""
+    from buddelkiste.docker_proxy import load_effective_policy, project_policy_key
+
+    policy = load_effective_policy(config=load_config())
+    click.echo(f"project: {project_policy_key()}")
+    click.echo(f"on_unknown_image: {policy.on_unknown_image}")
+    click.echo(f"images ({len(policy.images)}):")
+    if not policy.images:
+        click.echo("  (none)")
+    for ref in policy.images:
+        click.echo(f"  - {ref}")
+
+
+@docker_policy_group.command("apply")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be written without changing the host policy file.",
+)
+def docker_policy_apply(dry_run: bool) -> None:
+    """Write ``[docker_proxy]`` from config into the host enforcement store."""
+    from buddelkiste.docker_proxy import (
+        declaration_from_config,
+        host_policy_path,
+        project_policy_key,
+        write_policy_file,
+    )
+
+    config = load_config()
+    declaration = declaration_from_config(config)
+    if declaration is None:
+        raise click.ClickException(
+            "No [docker_proxy] table in config; add images there first"
+        )
+    key = project_policy_key()
+    path = host_policy_path(key)
+    if dry_run:
+        click.echo(f"Would write {len(declaration.images)} image(s) to {path}")
+        for ref in declaration.images:
+            click.echo(f"  - {ref}")
+        return
+    write_policy_file(path, declaration)
+    click.echo(f"Wrote {len(declaration.images)} image(s) to {path}")
 
 
 @cli.group("shims")

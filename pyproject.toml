@@ -19,6 +19,7 @@ asdf = "buddelkiste.features:ASDF"
 cursor = "buddelkiste.features:CURSOR"
 dbus = "buddelkiste.features:DBUS"
 docker = "buddelkiste.features:DOCKER"
+docker-proxy = "buddelkiste.features:DOCKER_PROXY"
 git = "buddelkiste.features:GIT"
 google = "buddelkiste.features:GOOGLE"
 gui = "buddelkiste.features:GUI"
@@ -60,6 +61,7 @@ markers = [
     "requires_nested_user: needs unshare --user --map-root-user",
     "requires_tun: needs /dev/net/tun and filter-mode helpers",
     "requires_outbound: needs outbound TCP to 1.1.1.1:443",
+    "requires_docker: needs host Docker daemon; skipped inside bwrap sandboxes",
 ]
 
 [tool.coverage.run]
