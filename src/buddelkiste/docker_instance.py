@@ -12,6 +12,7 @@ import os
 import pwd
 import shutil
 import signal
+import socket
 import subprocess
 import time
 from collections.abc import Iterator, Mapping, Sequence
@@ -56,6 +57,9 @@ _MINIMAL_RO_BINDS = (
     "/etc/ssl",
     "/etc/ca-certificates",
     "/etc/alternatives",
+    # rootlesskit needs these inside the FS jail to build uid/gid maps
+    "/etc/subuid",
+    "/etc/subgid",
 )
 
 
@@ -232,16 +236,20 @@ def check_rootless_prerequisites() -> None:
             "also fuse-overlayfs and slirp4netns/passt recommended)"
         )
     user = _username()
-    if not _subid_has_user(Path("/etc/subuid"), user):
-        raise click.ClickException(
-            f"docker-instance needs a /etc/subuid entry for {user!r} "
-            f"(e.g. '{user}:100000:65536')"
-        )
-    if not _subid_has_user(Path("/etc/subgid"), user):
-        raise click.ClickException(
-            f"docker-instance needs a /etc/subgid entry for {user!r} "
-            f"(e.g. '{user}:100000:65536')"
-        )
+    for label, path in (
+        ("/etc/subuid", Path("/etc/subuid")),
+        ("/etc/subgid", Path("/etc/subgid")),
+    ):
+        if not path.is_file():
+            raise click.ClickException(
+                f"docker-instance needs {label} with an entry for {user!r} "
+                f"(e.g. echo '{user}:100000:65536' | sudo tee -a {label})"
+            )
+        if not _subid_has_user(path, user):
+            raise click.ClickException(
+                f"docker-instance needs a {label} entry for {user!r} "
+                f"(e.g. echo '{user}:100000:65536' | sudo tee -a {label})"
+            )
 
 
 def expand_fs_allow(paths: Sequence[str]) -> list[Path]:
@@ -258,17 +266,25 @@ def expand_fs_allow(paths: Sequence[str]) -> list[Path]:
 
 def rootlesskit_net_args(net: str) -> list[str]:
     """Map ``net`` mode to rootlesskit ``--net=…`` and related flags."""
+    # Always copy-up /etc and /run so dockerd can create /run/docker (plugins).
+    common = [
+        "--disable-host-loopback",
+        "--port-driver=builtin",
+        "--copy-up=/etc",
+        "--copy-up=/run",
+        "--propagation=rslave",
+    ]
     if net == "host":
-        return ["--net=host"]
+        return ["--net=host", *common]
     if net == "none":
-        return ["--net=none"]
-    # userspace: prefer pasta, then slirp4netns
-    if shutil.which("pasta"):
-        return ["--net=pasta", "--copy-up=/etc", "--copy-up=/run"]
+        return ["--net=none", *common]
+    # Prefer slirp4netns (stable); pasta is still experimental in some releases.
     if shutil.which("slirp4netns"):
-        return ["--net=slirp4netns", "--copy-up=/etc", "--copy-up=/run"]
+        return ["--net=slirp4netns", *common]
+    if shutil.which("pasta"):
+        return ["--net=pasta", *common]
     raise click.ClickException(
-        "docker-instance net=userspace needs pasta (passt) or slirp4netns"
+        "docker-instance net=userspace needs slirp4netns or pasta (passt)"
     )
 
 
@@ -288,13 +304,19 @@ def daemon_bwrap_prefix(
     fs_allow: Sequence[Path],
     net: str,
 ) -> list[str]:
-    """bwrap argv prefix that FS-jails the daemon (no ``--unshare-user``)."""
+    """bwrap argv to FS-jail dockerd *inside* rootlesskit (already uid 0 in a userns)."""
     if fs == "host":
         return []
 
+    # Do not put bwrap outside rootlesskit: unprivileged bwrap creates a userns
+    # and then newuidmap for rootlesskit fails ("Could not set caps").
     args: list[str] = [
         "bwrap",
         "--die-with-parent",
+        # bwrap drops all caps by default; dockerd/runc need them to mount
+        # sysfs/cgroup and set up container namespaces inside the userns.
+        "--cap-add",
+        "ALL",
         "--unshare-pid",
         "--unshare-ipc",
         "--unshare-uts",
@@ -311,6 +333,15 @@ def daemon_bwrap_prefix(
     ]
     if net == "none":
         args.append("--unshare-net")
+
+    # Expose host sysfs; then RW-bind cgroup on top for rootless delegation.
+    # (Order matters: a later --ro-bind /sys would hide a prior cgroup bind.)
+    sys_path = Path("/sys")
+    if sys_path.is_dir():
+        args.extend(["--ro-bind", str(sys_path), str(sys_path)])
+    cgroup = Path("/sys/fs/cgroup")
+    if cgroup.is_dir():
+        args.extend(["--bind", str(cgroup), str(cgroup)])
 
     for host in _MINIMAL_RO_BINDS:
         args.extend(_ro_bind_if_exists(host))
@@ -361,17 +392,24 @@ def build_dockerd_command(
         f"--exec-root={exec_root}",
         f"--pidfile={pidfile}",
         f"-H=unix://{sock}",
-        "--containerd-namespace=buddelkiste-instance",
-        "--iptables=true",
+        "--iptables=false",
         "--ip-forward=false",
     ]
-    rootlesskit = [
-        "rootlesskit",
-        f"--state-dir={exec_root / 'rootlesskit'}",
-        *rootlesskit_net_args(net),
+    # With --copy-up=/run, /run/docker is often a read-only symlink into the host
+    # mount (same as dockerd-rootless.sh). Replace it so dockerd can mkdir plugins/.
+    child = [
+        "sh",
+        "-c",
+        (
+            "rm -rf /run/docker /run/containerd /run/xtables.lock;"
+            "mkdir -p /run/docker/plugins;"
+            'exec "$@"'
+        ),
+        "dockerd-prep",
         *dockerd,
     ]
-    prefix = daemon_bwrap_prefix(
+    # FS jail must run *inside* rootlesskit (mapped root), never outside it.
+    jail = daemon_bwrap_prefix(
         fs=fs,
         data_root=data_root,
         project=project,
@@ -379,20 +417,29 @@ def build_dockerd_command(
         fs_allow=fs_allow,
         net=net,
     )
-    return [*prefix, *rootlesskit]
+    if jail:
+        inner: list[str] = [*jail, *child]
+    else:
+        inner = child
+    return [
+        "rootlesskit",
+        f"--state-dir={exec_root / 'rootlesskit'}",
+        *rootlesskit_net_args(net),
+        *inner,
+    ]
 
 
 def _wait_for_socket(
     sock: Path,
     proc: subprocess.Popen,
     *,
-    timeout: float = 30.0,
+    timeout: float = 60.0,
     log_path: Path | None = None,
 ) -> None:
+    """Wait until the Engine API on ``sock`` answers ``GET /_ping``."""
     deadline = time.monotonic() + timeout
+    last_err = "socket not created"
     while time.monotonic() < deadline:
-        if sock.exists():
-            return
         if proc.poll() is not None:
             stderr = ""
             if log_path is not None and log_path.is_file():
@@ -404,9 +451,33 @@ def _wait_for_socket(
                 f"docker-instance dockerd exited early (code {proc.returncode})"
                 + (f": {stderr.strip()[-2000:]}" if stderr.strip() else "")
             )
-        time.sleep(0.05)
+        if sock.exists():
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                client.settimeout(1.0)
+                client.connect(os.fspath(sock))
+                client.sendall(b"GET /_ping HTTP/1.1\r\nHost: docker\r\n\r\n")
+                data = client.recv(256)
+                if data.startswith(b"HTTP/1.") and b"200" in data.split(b"\r\n", 1)[0]:
+                    return
+                last_err = f"unexpected ping response: {data[:80]!r}"
+            except OSError as exc:
+                last_err = str(exc)
+            finally:
+                try:
+                    client.close()
+                except OSError:
+                    pass
+        time.sleep(0.15)
+    stderr = ""
+    if log_path is not None and log_path.is_file():
+        try:
+            stderr = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+    detail = stderr.strip()[-2000:] if stderr.strip() else last_err
     raise click.ClickException(
-        f"docker-instance timed out waiting for daemon socket {sock}"
+        f"docker-instance timed out waiting for daemon socket {sock}: {detail}"
     )
 
 
@@ -432,6 +503,31 @@ def _stop_process(proc: subprocess.Popen | None) -> None:
             pass
 
 
+# Linux AF_UNIX path limit (sun_path); containerd rejects paths longer than 104.
+_AF_UNIX_PATH_MAX = 104
+_CONTAINERD_SOCK_TAIL = "e/containerd/containerd.sock.ttrpc"
+
+
+def _short_instance_base() -> Path:
+    """Return a short directory for exec-root / sockets (AF_UNIX length limit)."""
+    pid = os.getpid()
+    candidates: list[Path] = []
+    xdg = os.environ.get("XDG_RUNTIME_DIR")
+    if xdg:
+        candidates.append(Path(xdg) / f"bdi{pid}")
+    candidates.append(Path("/tmp") / f"bdi{pid}")
+    candidates.append(Path("/tmp") / f"b{pid}")
+    for base in candidates:
+        worst = base / _CONTAINERD_SOCK_TAIL
+        if len(os.fspath(worst).encode()) <= _AF_UNIX_PATH_MAX:
+            base.mkdir(parents=True, exist_ok=True)
+            return base
+    raise click.ClickException(
+        "cannot find a short enough path for docker-instance sockets "
+        f"(need room for {_CONTAINERD_SOCK_TAIL!r} within {_AF_UNIX_PATH_MAX} bytes)"
+    )
+
+
 @contextmanager
 def docker_instance_setup(
     *,
@@ -447,18 +543,17 @@ def docker_instance_setup(
     project = project_root()
     fs_allow = expand_fs_allow(cfg.fs_allow)
 
-    xdg_runtime = Path(os.environ["XDG_RUNTIME_DIR"]) if os.environ.get("XDG_RUNTIME_DIR") else None
-    base_runtime = runtime_dir or (xdg_runtime / "bk-docker-instance" if xdg_runtime else Path("/tmp") / f"bk-di-{os.getpid()}")
-    base_runtime = base_runtime.resolve()
-    base_runtime.mkdir(parents=True, exist_ok=True)
-
-    exec_root = base_runtime / "exec"
+    # exec-root holds containerd.sock.ttrpc — must stay under AF_UNIX path limits.
+    # pytest tmp_path is often too long, so always prefer a short base.
+    short_base = _short_instance_base()
+    if runtime_dir is not None:
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+    exec_root = short_base / "e"
+    exec_root.mkdir(parents=True, exist_ok=True)
     pidfile = exec_root / "dockerd.pid"
-    daemon_sock = _short_listen_socket(base_runtime)
-    # Prefer a stable name under our runtime dir when path length allows.
-    preferred = base_runtime / "docker.sock"
-    if len(os.fspath(preferred).encode()) <= 107:
-        daemon_sock = preferred
+    daemon_sock = short_base / "d.sock"
+    if len(os.fspath(daemon_sock).encode()) > _AF_UNIX_PATH_MAX:
+        daemon_sock = _short_listen_socket(short_base)
 
     cmd = build_dockerd_command(
         data_root=data_root,
@@ -468,11 +563,11 @@ def docker_instance_setup(
         net=cfg.net,
         fs=cfg.fs,
         project=project,
-        runtime_dir=base_runtime,
+        runtime_dir=short_base,
         fs_allow=fs_allow,
     )
     log.info("docker-instance starting: %s", " ".join(cmd))
-    log_path = base_runtime / "dockerd.log"
+    log_path = (runtime_dir or short_base) / "dockerd.log"
     log_file = log_path.open("wb")
     proc = subprocess.Popen(
         cmd,
@@ -490,7 +585,7 @@ def docker_instance_setup(
             # defaults (empty host store would otherwise fall back to docker-proxy
             # defaults that deny build).
             write_policy_file(host_policy_path(policy_key), cfg.policy)
-            listen = _short_listen_socket(base_runtime)
+            listen = _short_listen_socket(short_base)
             proxy = DockerProxyServer(
                 listen,
                 daemon_sock,
@@ -531,3 +626,7 @@ def docker_instance_setup(
                 daemon_sock.unlink()
             except OSError:
                 log.warning("failed to unlink docker-instance socket %s", daemon_sock)
+        try:
+            shutil.rmtree(short_base, ignore_errors=True)
+        except OSError:
+            pass

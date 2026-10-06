@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import click
@@ -80,21 +81,36 @@ def test_instance_policy_defaults_allow_build() -> None:
 
 
 def test_rootlesskit_net_args(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert rootlesskit_net_args("host") == ["--net=host"]
-    assert rootlesskit_net_args("none") == ["--net=none"]
+    host = rootlesskit_net_args("host")
+    assert "--net=host" in host
+    assert "--copy-up=/run" in host
+    none = rootlesskit_net_args("none")
+    assert "--net=none" in none
+    assert "--copy-up=/run" in none
+    monkeypatch.setattr(
+        "buddelkiste.docker_instance.shutil.which",
+        lambda name: "/usr/bin/slirp4netns" if name == "slirp4netns" else None,
+    )
+    userspace = rootlesskit_net_args("userspace")
+    assert "--net=slirp4netns" in userspace
+    assert "--disable-host-loopback" in userspace
+    assert "--port-driver=builtin" in userspace
+    assert "--propagation=rslave" in userspace
     monkeypatch.setattr(
         "buddelkiste.docker_instance.shutil.which",
         lambda name: "/usr/bin/pasta" if name == "pasta" else None,
     )
     assert "--net=pasta" in rootlesskit_net_args("userspace")
-    monkeypatch.setattr(
-        "buddelkiste.docker_instance.shutil.which",
-        lambda name: "/usr/bin/slirp4netns" if name == "slirp4netns" else None,
-    )
-    assert "--net=slirp4netns" in rootlesskit_net_args("userspace")
     monkeypatch.setattr("buddelkiste.docker_instance.shutil.which", lambda name: None)
-    with pytest.raises(click.ClickException, match="pasta"):
+    with pytest.raises(click.ClickException, match="slirp4netns|pasta"):
         rootlesskit_net_args("userspace")
+
+
+def test_minimal_ro_binds_include_subid() -> None:
+    from buddelkiste.docker_instance import _MINIMAL_RO_BINDS
+
+    assert "/etc/subuid" in _MINIMAL_RO_BINDS
+    assert "/etc/subgid" in _MINIMAL_RO_BINDS
 
 
 def test_daemon_bwrap_prefix_host_is_empty(tmp_path: Path) -> None:
@@ -111,12 +127,23 @@ def test_daemon_bwrap_prefix_host_is_empty(tmp_path: Path) -> None:
     )
 
 
-def test_daemon_bwrap_prefix_project(tmp_path: Path) -> None:
+def test_daemon_bwrap_prefix_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     data = tmp_path / "data"
     proj = tmp_path / "proj"
     run = tmp_path / "run"
     extra = tmp_path / "extra"
     extra.mkdir()
+
+    # Force subid paths to appear in the jail argv (they may be absent on CI hosts).
+    real_exists = Path.exists
+
+    def fake_exists(self: Path) -> bool:
+        if str(self) in {"/etc/subuid", "/etc/subgid"}:
+            return True
+        return real_exists(self)
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+
     args = daemon_bwrap_prefix(
         fs="project",
         data_root=data,
@@ -129,11 +156,50 @@ def test_daemon_bwrap_prefix_project(tmp_path: Path) -> None:
     assert "--unshare-user" not in args
     assert "--unshare-net" in args
     assert "--unshare-pid" in args
+    assert "--cap-add" in args and "ALL" in args
     text = " ".join(args)
     assert str(data) in text
     assert str(proj) in text
     assert str(extra) in text
+    assert "/etc/subuid" in args
+    assert "/etc/subgid" in args
+    if Path("/sys/fs/cgroup").is_dir():
+        assert "/sys/fs/cgroup" in args
     assert args[-1] == "--"
+
+
+def test_build_dockerd_command_project_jail_includes_subid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "buddelkiste.docker_instance.rootlesskit_net_args",
+        lambda net: ["--net=pasta", "--disable-host-loopback"],
+    )
+    real_exists = Path.exists
+
+    def fake_exists(self: Path) -> bool:
+        if str(self) in {"/etc/subuid", "/etc/subgid", "/usr", "/lib", "/bin"}:
+            return True
+        return real_exists(self)
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+    cmd = build_dockerd_command(
+        data_root=tmp_path / "data",
+        exec_root=tmp_path / "exec",
+        pidfile=tmp_path / "exec" / "dockerd.pid",
+        sock=tmp_path / "run" / "docker.sock",
+        net="userspace",
+        fs="project",
+        project=tmp_path / "proj",
+        runtime_dir=tmp_path / "run",
+        fs_allow=(),
+    )
+    assert cmd[0] == "rootlesskit"
+    assert "bwrap" in cmd
+    assert cmd.index("rootlesskit") < cmd.index("bwrap")
+    assert "/etc/subuid" in cmd
+    assert "/etc/subgid" in cmd
+
 
 
 def test_daemon_bwrap_prefix_data_skips_project(tmp_path: Path) -> None:
@@ -175,6 +241,8 @@ def test_build_dockerd_command_includes_rootlesskit(
     )
     assert cmd[0] == "rootlesskit"
     assert "dockerd" in cmd
+    assert "rm -rf /run/docker" in " ".join(cmd)
+    assert "mkdir -p /run/docker/plugins" in " ".join(cmd)
     assert any(a.startswith("--data-root=") for a in cmd)
     assert any(a.startswith("-H=unix://") for a in cmd)
 
@@ -197,8 +265,9 @@ def test_build_dockerd_command_with_fs_jail(
         runtime_dir=tmp_path / "run",
         fs_allow=(),
     )
-    assert cmd[0] == "bwrap"
-    assert "rootlesskit" in cmd
+    assert cmd[0] == "rootlesskit"
+    assert "bwrap" in cmd
+    assert cmd.index("rootlesskit") < cmd.index("bwrap")
     assert "dockerd" in cmd
 
 
@@ -238,16 +307,37 @@ def test_check_rootless_prerequisites_missing_subuid(
         check_rootless_prerequisites()
 
 
+def test_short_instance_base_fits_containerd_sock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from buddelkiste.docker_instance import (
+        _AF_UNIX_PATH_MAX,
+        _CONTAINERD_SOCK_TAIL,
+        _short_instance_base,
+    )
+
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
+    (tmp_path / "run").mkdir()
+    base = _short_instance_base()
+    worst = base / _CONTAINERD_SOCK_TAIL
+    assert len(os.fspath(worst).encode()) <= _AF_UNIX_PATH_MAX
+
+
 def test_docker_instance_setup_proxy_args(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Setup yields DOCKER_HOST when daemon start is stubbed."""
+    import socket
+    import threading
+
     from buddelkiste.docker_instance import docker_instance_setup
 
     home = tmp_path / "home"
     home.mkdir()
     run = tmp_path / "run"
     run.mkdir()
+    short = tmp_path / "short"
+    short.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(run))
     monkeypatch.chdir(tmp_path)
@@ -259,6 +349,38 @@ def test_docker_instance_setup_proxy_args(
         "buddelkiste.docker_instance.build_dockerd_command",
         lambda **_k: ["true"],
     )
+    monkeypatch.setattr(
+        "buddelkiste.docker_instance._short_instance_base",
+        lambda: short,
+    )
+
+    preferred = short / "d.sock"
+    listen_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    if preferred.exists():
+        preferred.unlink()
+    preferred.parent.mkdir(parents=True, exist_ok=True)
+    listen_sock.bind(os.fspath(preferred))
+    listen_sock.listen(8)
+
+    def _accept_loop() -> None:
+        while True:
+            try:
+                conn, _addr = listen_sock.accept()
+            except OSError:
+                break
+            try:
+                conn.recv(1024)
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+            except OSError:
+                pass
+            finally:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+
+    acceptor = threading.Thread(target=_accept_loop, daemon=True)
+    acceptor.start()
 
     class FakeProc:
         def poll(self) -> int | None:
@@ -273,14 +395,10 @@ def test_docker_instance_setup_proxy_args(
         def kill(self) -> None:
             return None
 
-    def fake_popen(cmd: list[str], **_kwargs: object) -> FakeProc:
-        # Mimic dockerd creating its listen socket.
-        preferred = run / "docker.sock"
-        preferred.parent.mkdir(parents=True, exist_ok=True)
-        preferred.touch()
-        return FakeProc()
-
-    monkeypatch.setattr("buddelkiste.docker_instance.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(
+        "buddelkiste.docker_instance.subprocess.Popen",
+        lambda *a, **k: FakeProc(),
+    )
 
     started: list[object] = []
 
@@ -301,15 +419,23 @@ def test_docker_instance_setup_proxy_args(
 
     monkeypatch.setattr("buddelkiste.docker_instance.DockerProxyServer", FakeProxy)
 
-    with docker_instance_setup(
-        instance=DockerInstanceConfig(proxy=True),
-        runtime_dir=run,
-    ) as args:
-        assert args[args.index("--setenv") + 1] == "DOCKER_HOST"
-        assert args[args.index("--setenv") + 2].startswith("unix://")
-        assert "--ro-bind" in args
-        assert started
-        assert started[0].listen.exists()  # type: ignore[attr-defined]
+    try:
+        with docker_instance_setup(
+            instance=DockerInstanceConfig(proxy=True),
+            runtime_dir=run,
+        ) as args:
+            assert args[args.index("--setenv") + 1] == "DOCKER_HOST"
+            assert args[args.index("--setenv") + 2].startswith("unix://")
+            assert "--ro-bind" in args
+            assert started
+            assert started[0].listen.exists()  # type: ignore[attr-defined]
+    finally:
+        try:
+            listen_sock.close()
+        except OSError:
+            pass
+        if preferred.exists():
+            preferred.unlink()
 
 
 def test_feature_mutex_docker_instance() -> None:

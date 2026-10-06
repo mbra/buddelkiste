@@ -196,6 +196,60 @@ def test_read_http_request_and_reject() -> None:
         client.close()
 
 
+def test_read_http_request_chunked_body() -> None:
+    server, client = socket.socketpair()
+    try:
+        payload = b'{"Image":"chunked"}'
+        raw = (
+            b"POST /build?t=x HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n"
+            + f"{len(payload):x}\r\n".encode()
+            + payload
+            + b"\r\n0\r\n\r\n"
+        )
+        client.sendall(raw)
+        parsed = _read_http_request(server)
+        assert parsed is not None
+        method, path, headers, got = parsed
+        assert method == "POST"
+        assert path.startswith("/build")
+        assert "chunked" in headers.get("Transfer-Encoding", "").lower()
+        assert got == payload
+
+        upstream = _build_upstream_request(method, path, headers, got)
+        text = upstream.decode("latin-1")
+        assert "Transfer-Encoding" not in text
+        assert f"Content-Length: {len(payload)}" in text
+        assert upstream.endswith(payload)
+    finally:
+        server.close()
+        client.close()
+
+
+def test_read_http_request_chunked_body_with_trailers() -> None:
+    server, client = socket.socketpair()
+    try:
+        payload = b"abc"
+        raw = (
+            b"POST /build HTTP/1.1\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n"
+            b"3\r\nabc\r\n"
+            b"0\r\n"
+            b"X-Trailer: 1\r\n"
+            b"\r\n"
+        )
+        client.sendall(raw)
+        parsed = _read_http_request(server)
+        assert parsed is not None
+        assert parsed[3] == payload
+    finally:
+        server.close()
+        client.close()
+
+
 def test_read_http_request_eof_and_bad_request_line() -> None:
     server, client = socket.socketpair()
     try:

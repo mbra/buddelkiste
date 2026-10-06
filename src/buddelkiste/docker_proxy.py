@@ -459,6 +459,54 @@ def evaluate_request(
 
 
 _MAX_HTTP_HEADERS = 16 * 1024 * 1024
+_MAX_HTTP_BODY = 512 * 1024 * 1024
+
+
+def _recv_until(conn: socket.socket, buf: bytearray, needle: bytes, *, limit: int) -> None:
+    while needle not in buf:
+        chunk = conn.recv(65536)
+        if not chunk:
+            return
+        buf.extend(chunk)
+        if len(buf) > limit:
+            raise ValueError("HTTP message too large")
+
+
+def _read_chunked_body(conn: socket.socket, initial: bytes) -> bytes:
+    """Decode a Transfer-Encoding: chunked body (docker CLI uses this for builds)."""
+    buf = bytearray(initial)
+    body = bytearray()
+    while True:
+        _recv_until(conn, buf, b"\r\n", limit=_MAX_HTTP_BODY)
+        if b"\r\n" not in buf:
+            break
+        line, rest = bytes(buf).split(b"\r\n", 1)
+        buf = bytearray(rest)
+        size_token = line.split(b";", 1)[0].strip()
+        try:
+            size = int(size_token, 16)
+        except ValueError as exc:
+            raise ValueError("invalid chunk size") from exc
+        if size == 0:
+            # After `0\r\n`, a bare CRLF ends the body (no trailers). With
+            # trailers the terminator is a blank line (`\r\n\r\n`).
+            if not buf.startswith(b"\r\n"):
+                _recv_until(conn, buf, b"\r\n\r\n", limit=_MAX_HTTP_HEADERS)
+            break
+        need = size + 2  # chunk data + trailing CRLF
+        while len(buf) < need:
+            chunk = conn.recv(65536)
+            if not chunk:
+                body.extend(buf[:size])
+                return bytes(body)
+            buf.extend(chunk)
+            if len(body) + len(buf) > _MAX_HTTP_BODY:
+                raise ValueError("HTTP body too large")
+        body.extend(buf[:size])
+        buf = buf[need:]
+        if len(body) > _MAX_HTTP_BODY:
+            raise ValueError("HTTP body too large")
+    return bytes(body)
 
 
 def _read_http_request(conn: socket.socket) -> tuple[str, str, dict[str, str], bytes] | None:
@@ -487,14 +535,20 @@ def _read_http_request(conn: socket.socket) -> tuple[str, str, dict[str, str], b
         key, value = line.split(b":", 1)
         headers[key.decode("latin-1").title()] = value.decode("latin-1").strip()
 
-    body = rest
-    length = int(headers.get("Content-Length", "0") or "0")
-    while len(body) < length:
-        chunk = conn.recv(65536)
-        if not chunk:
-            break
-        body += chunk
-    body = body[:length]
+    te = headers.get("Transfer-Encoding", "").lower()
+    if "chunked" in te:
+        body = _read_chunked_body(conn, rest)
+    else:
+        body = rest
+        length = int(headers.get("Content-Length", "0") or "0")
+        while len(body) < length:
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            body += chunk
+            if len(body) > _MAX_HTTP_BODY:
+                raise ValueError("HTTP body too large")
+        body = body[:length]
     return method, path, headers, body
 
 
@@ -585,7 +639,8 @@ def _build_upstream_request(
     """
     hijack = _is_hijack_request(headers)
     header_lines = [f"{method} {path} HTTP/1.1"]
-    skip = {"Content-Length", "Host"}
+    # Always re-emit Content-Length from the (decoded) body; drop chunked TE.
+    skip = {"Content-Length", "Host", "Transfer-Encoding"}
     if not hijack:
         skip.add("Connection")
     for key, value in headers.items():
