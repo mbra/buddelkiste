@@ -1,0 +1,480 @@
+#!/usr/bin/env python3
+"""Set the project version, tag it, and build PyPI artifacts.
+
+Usage: scripts/release [-d|--dry-run] [--rc] [VERSION]
+
+VERSION is a dotted release such as 0.2.0 (a leading "v" is accepted and
+stripped). When omitted and stdin is a TTY, the script prints commit
+summaries since the last release and prompts for a version. The script
+commits the version bump, creates an annotated tag vVERSION, and writes a
+release sdist plus a universal wheel to dist/<version>/. It does not push
+the tag. dist/latest points at the version just built. dist/stable points
+at the newest tagged final release and is left alone for a --rc build.
+
+Unless --dry-run is set, the built artifacts are published with
+``uv publish`` (using uv's configured index and credentials).
+
+--rc builds a release candidate of VERSION. A plain VERSION such as 0.3.0
+selects the next free candidate (0.3.0rc1, then 0.3.0rc2, from the local
+tags). An explicit candidate (0.3.0rc2 or 0.3.0-rc.2) is used as given and
+stored in PEP 440 form (0.3.0rcN). pip and uv will not install a
+pre-release unless that version is requested or --pre is given. The
+candidate is committed and tagged. dist/latest and dist/rc point at it.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import List, Optional, Sequence
+
+ROOT = Path(__file__).resolve().parent.parent
+PYPROJECT_TOML = ROOT / "pyproject.toml"
+UV_LOCK = ROOT / "uv.lock"
+DIST = ROOT / "dist"
+
+VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.]+)?$")
+PLAIN_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+# Accept ``0.3.0rc1``, ``0.3.0-rc.1``, and ``0.3.0-rc1`` on input; store
+# and tag the PEP 440 spelling ``0.3.0rc1``.
+RC_INPUT_RE = re.compile(
+    r"^(?P<base>[0-9]+\.[0-9]+\.[0-9]+)(?:-rc\.|-rc|rc)(?P<n>[0-9]+)$"
+)
+RC_PEP440_RE = re.compile(r"^(?P<base>[0-9]+\.[0-9]+\.[0-9]+)rc(?P<n>[0-9]+)$")
+
+
+class ReleaseError(Exception):
+    def __init__(self, message: str, code: int = 1) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="scripts/release",
+        usage="scripts/release [-d|--dry-run] [--rc] [VERSION]",
+        description="Set the project version, tag it, and build PyPI artifacts.",
+    )
+    parser.add_argument(
+        "-d",
+        "--dry-run",
+        action="store_true",
+        help="print the plan and stop (skips commit, tag, build, and upload)",
+    )
+    parser.add_argument(
+        "--rc",
+        action="store_true",
+        help=(
+            "commit and tag the next release candidate of VERSION "
+            "(0.3.0 -> 0.3.0rc1)"
+        ),
+    )
+    parser.add_argument(
+        "version",
+        metavar="VERSION",
+        nargs="?",
+        help="release version, e.g. 0.2.0 (prompted when omitted on a TTY)",
+    )
+    return parser.parse_args(argv)
+
+
+def run(
+    args: Sequence[str],
+    *,
+    cwd: Optional[Path] = None,
+    env: Optional[dict] = None,
+    capture: bool = False,
+    check: bool = True,
+) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        list(args),
+        cwd=str(cwd or ROOT),
+        env=env,
+        check=check,
+        text=True,
+        stdout=subprocess.PIPE if capture else None,
+    )
+
+
+def git(*args: str, capture: bool = False, check: bool = True) -> subprocess.CompletedProcess:
+    return run(["git", *args], capture=capture, check=check)
+
+
+def project_version() -> str:
+    in_project = False
+    for line in PYPROJECT_TOML.read_text().splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_project = stripped == "[project]"
+            continue
+        if in_project and stripped.startswith("version = "):
+            return stripped.split('"')[1]
+    raise ReleaseError("project.version not found in pyproject.toml")
+
+
+def rewrite_pyproject_toml(old: str, new: str) -> None:
+    """Bump the [project] version field."""
+    old_field = f'version = "{old}"'
+    new_field = f'version = "{new}"'
+    out = []
+    in_project = False
+    replaced = False
+    for line in PYPROJECT_TOML.read_text().splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_project = stripped == "[project]"
+        if in_project and stripped.startswith("version = "):
+            line = line.replace(old_field, new_field, 1)
+            replaced = new_field in line
+        out.append(line)
+    if not replaced:
+        raise ReleaseError("refusing to rewrite pyproject.toml (version field not updated)")
+    PYPROJECT_TOML.write_text("".join(out))
+
+
+def normalize_version(text: str) -> str:
+    """Normalize a version to the spelling stored in pyproject.toml (PEP 440).
+
+    ``0.3.0-rc.1`` and ``0.3.0-rc1`` become ``0.3.0rc1``.
+    """
+    match = RC_INPUT_RE.match(text)
+    if match and not RC_PEP440_RE.match(text):
+        return f"{match.group('base')}rc{match.group('n')}"
+    return text
+
+
+def parse_rc_request(text: str) -> tuple[str, Optional[int]]:
+    """Split an ``--rc`` argument into a release and an optional candidate number.
+
+    A plain release (``0.3.0``) leaves the number unset so the caller can
+    pick the next free one. ``0.3.0rc2`` and ``0.3.0-rc.2`` name one candidate.
+    """
+    if PLAIN_VERSION_RE.match(text):
+        return text, None
+    match = RC_INPUT_RE.match(text)
+    if match is None:
+        raise ReleaseError(
+            f"a release candidate is built from a release such as 0.3.0, not {text}",
+            code=2,
+        )
+    number = int(match.group("n"))
+    if number < 1:
+        raise ReleaseError("release candidate numbers start at 1", code=2)
+    return match.group("base"), number
+
+
+def pep440_rc_version(base: str, number: int) -> str:
+    """PEP 440 spelling of a release candidate."""
+    return f"{base}rc{number}"
+
+
+def next_rc_number(base: str) -> int:
+    """One past the highest local tag for ``base``, or 1 when none exist."""
+    listed = git(
+        "tag", "-l", f"v{base}-rc.*", f"v{base}rc*", capture=True
+    ).stdout.splitlines()
+    pattern = re.compile(rf"^v{re.escape(base)}(?:-rc\.|rc)([0-9]+)$")
+    highest = 0
+    for tag in listed:
+        match = pattern.match(tag.strip())
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return highest + 1
+
+
+def restore_manifests() -> None:
+    paths = ["pyproject.toml"]
+    if UV_LOCK.exists():
+        paths.append("uv.lock")
+    git("checkout", "--", *paths)
+
+
+def tag_exists(tag: str) -> bool:
+    result = git("rev-parse", "-q", "--verify", f"refs/tags/{tag}", capture=True, check=False)
+    return result.returncode == 0
+
+
+def release_tag_name(tag: str) -> Optional[str]:
+    """Return the version part of a release tag, or None if it is not one."""
+    name = tag[1:] if tag.startswith("v") else tag
+    if VERSION_RE.match(name) or RC_INPUT_RE.match(name):
+        return name
+    return None
+
+
+def last_release_ref() -> Optional[tuple[str, str]]:
+    """The most recent release boundary as (ref, label).
+
+    Prefer a tag or ``Release X.Y.Z.`` commit for the current project
+    version, so a series that tagged ``v4.0.3`` (or only committed it) is
+    found even when older bare tags still exist. Fall back to the newest
+    version-sorted release tag.
+    """
+    current = project_version()
+    for tag in (f"v{current}", current):
+        if tag_exists(tag):
+            return tag, tag
+
+    result = git(
+        "log",
+        "-1",
+        "--format=%H",
+        f"--grep=^Release {re.escape(current)}\\.$",
+        capture=True,
+        check=False,
+    )
+    commit = result.stdout.strip()
+    if result.returncode == 0 and commit:
+        return commit, f"Release {current}"
+
+    listed = git("tag", "-l", "--sort=-v:refname", capture=True).stdout.splitlines()
+    for tag in listed:
+        if release_tag_name(tag.strip()) is not None:
+            return tag.strip(), tag.strip()
+    return None
+
+
+def commits_since_last_release() -> tuple[Optional[str], List[str]]:
+    """Return (label, subject lines) for commits after the last release."""
+    boundary = last_release_ref()
+    if boundary is None:
+        log = git("log", "--format=%s", capture=True).stdout.splitlines()
+        return None, log
+    ref, label = boundary
+    log = git("log", f"{ref}..HEAD", "--format=%s", capture=True).stdout.splitlines()
+    return label, log
+
+
+def prompt_version(*, candidate: bool) -> str:
+    """Print commits since the last release and ask for a VERSION on a TTY."""
+    if not sys.stdin.isatty():
+        raise ReleaseError("VERSION is required when stdin is not a TTY", code=2)
+
+    label, subjects = commits_since_last_release()
+    current = project_version()
+    print(f"Current project version: {current}")
+    if label is None:
+        print("No previous release tag or commit found.")
+    else:
+        print(f"Commits since {label}:")
+    if not subjects:
+        print("  (none)")
+    else:
+        for subject in subjects:
+            print(f"  {subject}")
+    print()
+    if candidate:
+        prompt = "Upcoming release or candidate (e.g. 0.3.0 or 0.3.0rc2): "
+    else:
+        prompt = "Release version (e.g. 0.2.0): "
+    try:
+        given = input(prompt).strip()
+    except EOFError as exc:
+        raise ReleaseError("no version entered", code=2) from exc
+    if not given:
+        raise ReleaseError("no version entered", code=2)
+    return given
+
+
+def version_directory(name: str) -> Path:
+    """``dist/<name>``, refusing names that could escape that directory."""
+    if (
+        not name
+        or name in (".", "..", "latest", "stable", "rc")
+        or "/" in name
+        or "\\" in name
+    ):
+        raise ReleaseError(f"refusing version directory {name!r}")
+    return DIST / name
+
+
+def prepare_version_dir(name: str) -> Path:
+    """Replace ``dist/<name>`` with an empty directory. Other versions stay."""
+    path = version_directory(name)
+    if path.is_symlink():
+        raise ReleaseError(f"{path} is a symlink")
+    DIST.mkdir(exist_ok=True)
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir()
+    return path
+
+
+def retarget(link_name: str, version_name: str) -> None:
+    """Point ``dist/<link_name>`` at ``dist/<version_name>``."""
+    version_directory(version_name)
+    DIST.mkdir(exist_ok=True)
+    link = DIST / link_name
+    if link.is_symlink() or (link.exists() and not link.is_dir()):
+        link.unlink()
+    elif link.is_dir():
+        raise ReleaseError(f"{link} is a directory; not replacing it with a symlink")
+    temporary = DIST / f".{link_name}.tmp"
+    if temporary.is_symlink() or temporary.exists():
+        temporary.unlink()
+    temporary.symlink_to(version_name)
+    temporary.replace(link)
+
+
+def publish(name: str, *, stable: bool = False, candidate: bool = False) -> None:
+    """Point dist/latest at this version.
+
+    A final release also claims dist/stable. A release candidate claims
+    dist/rc and leaves dist/stable on the last final release, so the default
+    upload path does not start serving the candidate.
+    """
+    retarget("latest", name)
+    if stable:
+        retarget("stable", name)
+    if candidate:
+        retarget("rc", name)
+
+
+def build(version_name: str) -> Path:
+    """Build the sdist and universal wheel into ``dist/<version_name>/``."""
+    if shutil.which("uv") is None:
+        raise ReleaseError("uv is required to build the release artifacts")
+    out = prepare_version_dir(version_name)
+    print(f"Building sdist and wheel into {out.relative_to(ROOT)}/", flush=True)
+    run(
+        [
+            "uv",
+            "build",
+            "--out-dir",
+            str(out),
+            "--no-create-gitignore",
+        ]
+    )
+    return out
+
+
+def show_artifacts(directory: Path) -> None:
+    print()
+    print(f"Artifacts in {directory.relative_to(ROOT)}/:")
+    for artifact in sorted(directory.iterdir()):
+        print(artifact.name)
+
+
+def upload_artifacts(directory: Path) -> None:
+    """Publish every file in ``directory`` with ``uv publish``."""
+    artifacts = sorted(path for path in directory.iterdir() if path.is_file())
+    if not artifacts:
+        raise ReleaseError(f"no artifacts in {directory}")
+    run(["uv", "publish", *(str(path) for path in artifacts)])
+
+
+def main(argv: Sequence[str]) -> int:
+    args = parse_args(argv)
+
+    given = args.version
+    if given is None:
+        given = prompt_version(candidate=args.rc)
+    given = given[1:] if given.startswith("v") else given
+
+    current = project_version()
+    candidate = False
+    if args.rc:
+        base, number = parse_rc_request(given)
+        if number is None:
+            number = next_rc_number(base)
+        version = pep440_rc_version(base, number)
+        candidate = True
+    else:
+        if not VERSION_RE.match(given) and not RC_INPUT_RE.match(given):
+            raise ReleaseError(f"not a version: {given}", code=2)
+        version = normalize_version(given)
+        candidate = RC_PEP440_RE.match(version) is not None
+    tag = f"v{version}"
+
+    if git("status", "--porcelain", capture=True).stdout.strip():
+        if not args.dry_run:
+            raise ReleaseError("working tree is not clean")
+        print("working tree is not clean; a real run would stop here", file=sys.stderr)
+
+    wheels = (
+        f"would build an sdist and a universal wheel into dist/{version}/"
+    )
+
+    need_commit = False
+    need_tag = False
+    if tag_exists(tag):
+        if current != version:
+            raise ReleaseError(
+                f"tag {tag} already exists, but the project version is {current}"
+            )
+    else:
+        need_tag = True
+        need_commit = current != version
+
+    if args.dry_run:
+        if need_commit:
+            print(f"would commit version {current} -> {version}")
+        if need_tag:
+            print(f"would tag {tag}")
+        else:
+            print(f"tag {tag} already exists")
+        print(wheels)
+        if candidate:
+            print(f"would point dist/latest and dist/rc at {version}")
+            print("would leave dist/stable unchanged")
+            print(
+                f"{version} is a pre-release: pip and uv install it only for "
+                f"buddelkiste=={version} or when --pre is given"
+            )
+        else:
+            print(f"would point dist/latest and dist/stable at {version}")
+        print(f"would upload dist/{version}/* with uv publish")
+        return 0
+
+    if need_commit:
+        rewrite_pyproject_toml(current, version)
+        refreshed = run(["uv", "lock"], capture=True, check=False)
+        if refreshed.returncode != 0:
+            restore_manifests()
+            raise ReleaseError("uv lock rejected the new version; pyproject.toml restored")
+        paths = ["pyproject.toml"]
+        if UV_LOCK.exists():
+            paths.append("uv.lock")
+        git("add", *paths)
+        git("commit", "-m", f"Release {version}.")
+    if need_tag:
+        git("tag", "-a", tag, "-m", f"buddelkiste {version}")
+        print(f"tagged {tag}")
+
+    out = build(version)
+    publish(version, stable=not candidate, candidate=candidate)
+
+    show_artifacts(out)
+    print()
+    print(f"dist/latest -> {version}")
+    if candidate:
+        print(f"dist/rc -> {version}")
+    else:
+        print(f"dist/stable -> {version}")
+    print()
+    print("The tag is local. Publish it with:")
+    print(f"  git push origin HEAD {tag}")
+    print()
+    if candidate:
+        print(
+            f"{version} is a pre-release. pip and uv will not install it unless "
+            f"the version is requested (buddelkiste=={version}) or --pre is given."
+        )
+        print()
+    upload_artifacts(out)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except ReleaseError as exc:
+        print(exc, file=sys.stderr)
+        sys.exit(exc.code)
+    except subprocess.CalledProcessError as exc:
+        print(f"{exc.cmd[0]} exited with {exc.returncode}", file=sys.stderr)
+        sys.exit(exc.returncode or 1)
