@@ -74,13 +74,20 @@ debug-loop watcher instead of asking the user to paste logs each time.
    `===== DEBUG.LOG UPDATE` or `===== END DEBUG.LOG UPDATE`), reports findings,
    and continues fixing **without** re-prompting the user.
 
+5. When the suite is green (or the debug-loop work is otherwise finished),
+   **stop the watcher** — do not leave it running. Example::
+
+   ```bash
+   pkill -f 'scripts/debug-loop' 2>/dev/null || true
+   ```
+
 ### Behaviour notes
 
 - Watches **CLOSE_WRITE** and **MOVED_TO** only (not `MODIFY`), so progressive
   pytest writes do not spam mid-run dumps.
 - Dumps at most the last ~200k characters of `debug.log`.
 - Default path is `debug.log` in the cwd; pass another path as the first arg.
-- Stop the watcher when the loop is done (`Ctrl-C` / kill the background job).
+- Stopping is the agent's job after success; the user should not have to ask.
 
 ### Do not
 
@@ -88,3 +95,4 @@ debug-loop watcher instead of asking the user to paste logs each time.
   the `END DEBUG.LOG UPDATE` banner after the `tee` pipeline exits.
 - Do not require the user to paste the same log into chat if the watcher is
   already running.
+- Do not keep `debug-loop` running after tests succeed.
