@@ -233,6 +233,19 @@ def test_build_nft_ruleset_denylist_policy_allow() -> None:
     assert "10.0.0.0/8" in rules
 
 
+def test_build_nft_ruleset_collapses_overlapping_intervals() -> None:
+    net = NetworkConfig(
+        mode="filter",
+        policy="deny",
+        deny=["fc00::/7", "fd00:ec2::254/128", "127.0.0.0/8", "127.0.0.53/32"],
+    )
+    rules = build_nft_ruleset(net)
+    assert "fc00::/7" in rules
+    assert "fd00:ec2::254/128" not in rules
+    assert "127.0.0.0/8" in rules
+    assert "127.0.0.53/32" not in rules
+
+
 def test_resolv_conf_nameservers(tmp_path: Path) -> None:
     resolv = tmp_path / "resolv.conf"
     resolv.write_text(

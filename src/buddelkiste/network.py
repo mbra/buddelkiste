@@ -388,15 +388,32 @@ def nameserver_ips(path: Path | None = None) -> list[str]:
 
 
 def split_families(cidrs: Sequence[str]) -> tuple[list[str], list[str]]:
-    v4: list[str] = []
-    v6: list[str] = []
+    v4_nets: list[ipaddress.IPv4Network] = []
+    v6_nets: list[ipaddress.IPv6Network] = []
     for cidr in cidrs:
         net = ipaddress.ip_network(cidr, strict=False)
         if net.version == 4:
-            v4.append(str(net))
+            v4_nets.append(net)
         else:
-            v6.append(str(net))
-    return v4, v6
+            v6_nets.append(net)
+
+    def _collapsed_v4_text(nets: Sequence[ipaddress.IPv4Network]) -> list[str]:
+        if not nets:
+            return []
+        collapsed = ipaddress.collapse_addresses(
+            sorted(set(nets), key=lambda n: (int(n.network_address), n.prefixlen))
+        )
+        return [str(net) for net in collapsed]
+
+    def _collapsed_v6_text(nets: Sequence[ipaddress.IPv6Network]) -> list[str]:
+        if not nets:
+            return []
+        collapsed = ipaddress.collapse_addresses(
+            sorted(set(nets), key=lambda n: (int(n.network_address), n.prefixlen))
+        )
+        return [str(net) for net in collapsed]
+
+    return _collapsed_v4_text(v4_nets), _collapsed_v6_text(v6_nets)
 
 
 def build_nft_ruleset(
