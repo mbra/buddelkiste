@@ -59,10 +59,12 @@ def test_build_nft_ruleset_includes_dns_redirect_and_dyn_sets() -> None:
 
 def test_resolve_network_defaults() -> None:
     net = resolve_network({})
-    assert net.mode == "host"
+    assert net.mode == "filter"
     assert net.policy == "deny"
     assert net.allow == []
-    assert net.deny == []
+    assert "10.0.0.0/8" in net.deny
+    assert "127.0.0.0/8" in net.deny
+    assert set(net.deny_presets) == {"internal", "localhost"}
 
 
 def test_resolve_network_implies_filter_from_cli_options() -> None:
@@ -101,6 +103,8 @@ def test_resolve_network_explicit_mode_wins() -> None:
 
 def test_deny_presets_expand() -> None:
     assert "10.0.0.0/8" in expand_deny_presets(["private"])
+    assert expand_deny_presets(["internal"]) == expand_deny_presets(["private"])
+    assert "127.0.0.0/8" in expand_deny_presets(["localhost"])
     assert "169.254.169.254/32" in expand_deny_presets(["metadata"])
     with pytest.raises(click.ClickException, match="Unknown network deny preset"):
         expand_deny_presets(["nope"])

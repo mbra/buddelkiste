@@ -28,20 +28,19 @@ bk docker-policy approve   # or: deny [id|image]
 bk shims install
 bk shims check
 
-# Topic features (all on by default)
-bk run --no-feature gui --no-feature google cursor-agent
+# Topic features (only ``home`` on by default)
 bk run --feature python --feature ssh python myscript.py
+bk run --feature cursor --feature gui cursor-agent
 
-# Network modes
-bk run --network host …                 # share host network (default)
+# Network modes (filter is the default; denies internal + localhost)
+bk run --network host …                 # share host network
 bk run --network none …                 # no connectivity
 bk run --network filter \
   --net-policy deny \
   --net-allow 1.1.1.1/32 \
   --net-allow api.github.com \
   --net-allow '*.pypi.org' \
-  --net-deny-preset metadata \
-  --net-deny-preset private …
+  --net-deny-preset metadata …
 ```
 
 `bk run` wrapper options: `--debug`, `--feature` / `--no-feature`,
@@ -50,9 +49,9 @@ Everything else is the sandboxed command.
 
 ## Features
 
-Optional permission sets are grouped by topic. Built-ins default to **on**.
-Toggle with CLI flags or config; see `bk list-features` for the live catalog
-(including each feature's module path).
+Optional permission sets are grouped by topic. Only **`home`** is enabled by
+default; every other built-in is opt-in. Toggle with CLI flags or config; see
+`bk list-features` for the live catalog (including each feature's module path).
 
 | Feature | What it grants |
 |---------|----------------|
@@ -60,11 +59,12 @@ Toggle with CLI flags or config; see `bk list-features` for the live catalog
 | `cursor` | Cursor IDE/CLI install and state dirs |
 | `dbus` | session/system bus sockets, `DBUS_SESSION_BUS_ADDRESS` |
 | `docker` | `~/.docker`, Docker socket / `DOCKER_HOST` (conflicts with `docker-proxy` / `docker-instance`) |
-| `docker-proxy` | Filtered Docker API proxy + image allowlist (default **off**; conflicts with `docker` / `docker-instance`) |
-| `docker-instance` | Project-local rootless dockerd + FS/net isolation (default **off**; conflicts with `docker` / `docker-proxy`) |
+| `docker-proxy` | Filtered Docker API proxy + image allowlist (conflicts with `docker` / `docker-instance`) |
+| `docker-instance` | Project-local rootless dockerd + FS/net isolation (conflicts with `docker` / `docker-proxy`) |
 | `git` | `~/.gitconfig`, `~/.config/git` |
 | `google` | `/opt/google` |
 | `gui` | display, GPU, audio, fonts, related env |
+| `home` | `~/.local` (ro), `~/.cache` (rw) — **default on** |
 | `java` | OpenJDK `/etc/java-*-openjdk` configs |
 | `locale` | `LANG`, `LC_NUMERIC`, `LC_TIME` |
 | `node` | npm/nvm/bun paths, `BUN_INSTALL` |
@@ -73,7 +73,6 @@ Toggle with CLI flags or config; see `bk list-features` for the live catalog
 | `rust` | shared `~/.cargo` / `~/.rustup` (or `CARGO_HOME` / `RUSTUP_HOME`) |
 | `ssh` | `~/.ssh/config` plus a dedicated agent with `~/.ssh/sandbox_*` keys |
 | `term` | `TERM`, `TERMINFO`, `COLORTERM`, `TERM_PROGRAM`, `EDITOR` |
-| `user` | `~/.local` (ro), `~/.cache` (rw) |
 | `xdg-open` | host `xdg-open` via flatpak-xdg-utils |
 
 ### CLI
@@ -105,7 +104,7 @@ path) so the sandboxed command cannot read it.
 ```toml
 # Global allowlist (exactly these features), or use a table of overrides:
 # features = { gui = false, google = false }
-features = ["git", "ssh", "python", "rust", "term", "locale", "user"]
+features = ["home", "git", "ssh", "python", "rust", "term", "locale"]
 
 [feature.zig]
 description = "Zig toolchain cache"
@@ -169,11 +168,13 @@ name = "MYENVVAR"
 value = "example value"   # omit value= to take it from the process environment
 
 [network]
+# Defaults: mode = "filter", policy = "deny",
+# deny_presets = ["internal", "localhost"] (RFC1918/ULA + loopback).
 mode = "filter"
 policy = "deny"
 allow = ["1.1.1.1/32", "api.github.com", "*.pypi.org"]
 deny = ["203.0.113.0/24"]
-deny_presets = ["metadata", "linklocal", "corp"]
+deny_presets = ["internal", "localhost", "metadata", "linklocal", "corp"]
 
 [network.presets]
 corp = ["10.50.0.0/16", "*.internal.example.com"]
@@ -239,7 +240,7 @@ Built-ins and third-party packages register features under the
 |-------|------|---------|---------|
 | `name` | `str` | *(required)* | Feature id used in CLI/config (`--feature`, `features = [...]`). Overwritten by the entry-point name at load time. |
 | `description` | `str` | *(required)* | One-line summary shown by `bk list-features`. |
-| `default` | `bool` | `True` | Whether the feature is enabled before config/CLI overrides. |
+| `default` | `bool` | `False` | Whether the feature is enabled before config/CLI overrides. |
 | `env_vars` | `tuple[str, ...]` | `()` | Host env var names to forward into the sandbox when the feature is on. |
 | `binds` | `Callable[[], list]` | `lambda: []` | Zero-arg callable returning bind objects (`ROBindConfig`, `RWBindConfig`, `DevBindConfig`, overlay configs, `Tmpfs`, or raw bwrap arg tuples). Called each run. |
 | `setup` | `Callable[[], AbstractContextManager[Sequence[str]]] \| None` | `None` | Optional factory returning a context manager. Entered while the sandbox runs; its yielded sequence is appended as extra bwrap args (binds, `--setenv`, …). Use for sockets/agents that need lifecycle. |

@@ -43,12 +43,19 @@ NETWORK_MODES = ("host", "none", "filter")
 NETWORK_POLICIES = ("allow", "deny")
 
 # Named deny helpers expanded into concrete CIDRs at resolve time.
+_PRIVATE_CIDRS = (
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "fc00::/7",
+)
 DENY_PRESETS: dict[str, tuple[str, ...]] = {
-    "private": (
-        "10.0.0.0/8",
-        "172.16.0.0/12",
-        "192.168.0.0/16",
-        "fc00::/7",
+    "private": _PRIVATE_CIDRS,
+    # Alias for RFC1918/ULA — same ranges as ``private``.
+    "internal": _PRIVATE_CIDRS,
+    "localhost": (
+        "127.0.0.0/8",
+        "::1/128",
     ),
     "linklocal": (
         "169.254.0.0/16",
@@ -60,14 +67,19 @@ DENY_PRESETS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# Default filter deny list: internal (RFC1918/ULA) and loopback.
+DEFAULT_DENY_PRESETS: tuple[str, ...] = ("internal", "localhost")
+
 
 @dataclass
 class NetworkConfig:
-    mode: str = "host"
+    mode: str = "filter"
     policy: str = "deny"
     allow: list[str] = field(default_factory=list)
     deny: list[str] = field(default_factory=list)
-    deny_presets: list[str] = field(default_factory=list)
+    deny_presets: list[str] = field(
+        default_factory=lambda: list(DEFAULT_DENY_PRESETS)
+    )
     allow_hosts: list[str] = field(default_factory=list)
     deny_hosts: list[str] = field(default_factory=list)
 
@@ -220,7 +232,7 @@ def parse_network_table(
     if not isinstance(data, dict):
         raise click.ClickException(f"Invalid network {where}: expected a table")
 
-    mode = data.get("mode", "host")
+    mode = data.get("mode", "filter")
     if mode not in NETWORK_MODES:
         raise click.ClickException(
             f"Invalid network.mode {where}: {mode!r} (expected {', '.join(NETWORK_MODES)})"
@@ -235,7 +247,10 @@ def parse_network_table(
 
     allow = data.get("allow", [])
     deny = data.get("deny", [])
-    deny_presets = data.get("deny_presets", [])
+    if "deny_presets" in data:
+        deny_presets = data["deny_presets"]
+    else:
+        deny_presets = list(DEFAULT_DENY_PRESETS)
     if not isinstance(allow, list) or not isinstance(deny, list):
         raise click.ClickException(
             f"network.allow/deny {where} must be lists of IP/CIDR or hostname strings"

@@ -17,13 +17,13 @@ from buddelkiste.features import (
     feature_binds,
     feature_env_var_names,
     format_features_help,
+    home_binds,
     interpolate_env,
     load_entry_point_features,
     load_feature_registry,
     python_binds,
     resolve_features,
     rust_binds,
-    user_binds,
     xdg_open_binds,
 )
 
@@ -38,7 +38,8 @@ def test_feature_catalog_is_topic_oriented() -> None:
     assert "docker-instance" in FEATURES
     assert "dbus" in FEATURES
     assert "xdg-open" in FEATURES
-    assert "user" in FEATURES
+    assert "home" in FEATURES
+    assert "user" not in FEATURES
     assert "locale" in FEATURES
     assert "term" in FEATURES
     # Type-oriented names should not be features.
@@ -48,14 +49,16 @@ def test_feature_catalog_is_topic_oriented() -> None:
     assert "devtools" not in FEATURES
 
 
-def test_resolve_features_defaults_all_enabled() -> None:
+def test_resolve_features_defaults_only_home() -> None:
     enabled = resolve_features({})
     registry = load_feature_registry({})
     for name, feature in registry.items():
         assert enabled[name] is feature.default
+    assert enabled["home"] is True
     assert enabled["docker-proxy"] is False
     assert enabled["docker-instance"] is False
-    assert enabled["docker"] is True
+    assert enabled["docker"] is False
+    assert enabled["cursor"] is False
 
 
 def test_resolve_features_config_table_and_cli_precedence() -> None:
@@ -67,7 +70,8 @@ def test_resolve_features_config_table_and_cli_precedence() -> None:
     assert enabled["gui"] is False
     assert enabled["python"] is True  # CLI enable wins over config
     assert enabled["ssh"] is False
-    assert enabled["cursor"] is True
+    assert enabled["home"] is True  # still the only default-on feature
+    assert enabled["cursor"] is False
 
 
 def test_resolve_features_global_list_is_allowlist() -> None:
@@ -321,9 +325,9 @@ def test_topic_bind_helpers(
         getattr(b, "source", None) == "/usr/libexec/flatpak-xdg-utils/xdg-open"
         for b in xdg_open_binds()
     )
-    user_sources = {getattr(b, "source", None) for b in user_binds()}
-    assert str(home / ".local") in user_sources
-    assert str(home / ".cache") in user_sources
+    home_sources = {getattr(b, "source", None) for b in home_binds()}
+    assert str(home / ".local") in home_sources
+    assert str(home / ".cache") in home_sources
 
 
 def test_rust_feature_binds_and_env(
@@ -384,7 +388,7 @@ def test_user_and_xdg_open_features(
     assert str(home / ".cache") not in sources_off
     assert "/usr/libexec/flatpak-xdg-utils/xdg-open" not in sources_off
 
-    enabled["user"] = True
+    enabled["home"] = True
     enabled["xdg-open"] = True
     sources_on = {getattr(b, "source", None) for b in feature_binds(enabled)}
     assert str(home / ".local") in sources_on
@@ -432,13 +436,15 @@ def test_format_features_help_lists_topics() -> None:
     assert "rust" in text
     assert "gui" in text
     assert "xdg-open" in text
-    assert "user" in text
+    assert "home" in text
     assert "locale" in text
     assert "term" in text
-    assert "default: on" in text
+    assert "default: on" in text  # home
+    assert "default: off" in text
     assert "buddelkiste.features:CURSOR" in text
     assert "buddelkiste.features:PYTHON" in text
     assert "buddelkiste.features:RUST" in text
+    assert "buddelkiste.features:HOME" in text
 
 
 def test_entry_point_features_include_builtins() -> None:

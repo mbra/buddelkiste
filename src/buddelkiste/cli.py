@@ -29,11 +29,12 @@ can be inspected.
 
 # Features
 
-Optional permission sets are grouped by topic (cursor, python, ssh, ...).
-Built-ins default to on and are registered via the buddelkiste.features entry
-point group (third-party packages can add more). Toggle with --feature /
---no-feature, or in config. Define pure-TOML features under [feature.<name>].
-Use `bk list-features` to print the catalog (includes module paths).
+Optional permission sets are grouped by topic (home, cursor, python, ssh, ...).
+Only ``home`` is on by default; other built-ins are opt-in. Features are
+registered via the buddelkiste.features entry-point group (third-party packages
+can add more). Toggle with --feature / --no-feature, or in config. Define
+pure-TOML features under [feature.<name>]. Use `bk list-features` to print the
+catalog (includes module paths).
 
 Config may set features globally and per executable (matched by path or
 basename of the command being started). A list selects exactly those features;
@@ -47,18 +48,20 @@ Use `bk shims check` to detect originals that shadow those shims on PATH.
 
 # Network
 
-Modes: host (default, share host network), none (no connectivity), filter
-(private netns via pasta or slirp4netns with in-namespace nftables IP/CIDR
-allow/deny). Filter mode is selected automatically when allow/deny/policy
-options are used, unless --network or config mode says otherwise. Filter mode
-needs no root and no reserved host subnets.
+Modes: filter (default; private netns via pasta or slirp4netns with
+in-namespace nftables IP/CIDR allow/deny), host (share host network), none
+(no connectivity). Filter mode needs no root and no reserved host subnets.
+By default filter also applies the ``internal`` and ``localhost`` deny presets
+(RFC1918/ULA and loopback). Host loopback is additionally blocked by
+pasta/slirp.
 
 In filter mode, nameserver IPs from /etc/resolv.conf are auto-allowed so DNS
 keeps working under a default-deny policy. Rules may be IP/CIDR literals or
 hostnames (exact or *.suffix); hostnames use a DNS proxy that publishes
-resolved A/AAAA addresses into dynamic nft sets. Named deny presets (private,
-linklocal, metadata, plus custom names under [network.presets]) expand to
-IP/CIDR or hostname denials; see `bk list-net-presets`.
+resolved A/AAAA addresses into dynamic nft sets. Named deny presets (internal,
+private, localhost, linklocal, metadata, plus custom names under
+[network.presets]) expand to IP/CIDR or hostname denials; see
+`bk list-net-presets`.
 
 
 # Configuration
@@ -262,8 +265,8 @@ def cli() -> None:
     "network_mode",
     type=click.Choice(["host", "none", "filter"], case_sensitive=False),
     default=None,
-    help="Network mode: host (default), none, or filter. Filter is implied by "
-    "allow/deny/policy options.",
+    help="Network mode: filter (default), host, or none. Filter is also implied "
+    "by allow/deny/policy options when mode is omitted.",
 )
 @click.option(
     "--net-policy",

@@ -44,9 +44,10 @@ def test_cli_runs_bwrap_with_command(
     result = CliRunner().invoke(cli, ["run", "--no-feature", "ssh", "/bin/echo", "hello"])
     assert result.exit_code == 42, result.output
     assert fake_bwrap["args"][:1] == ["bwrap"]
-    assert "--share-net" not in fake_bwrap["args"]  # added inside run_bwrap for host
     assert fake_bwrap["args"][-3:] == ["--", "/bin/echo", "hello"]
-    assert fake_bwrap["nets"][0].mode == "host"
+    assert fake_bwrap["nets"][0].mode == "filter"
+    assert "10.0.0.0/8" in fake_bwrap["nets"][0].deny
+    assert "127.0.0.0/8" in fake_bwrap["nets"][0].deny
     assert "SSH_AUTH_SOCK" not in fake_bwrap["args"]
 
 
@@ -191,7 +192,9 @@ def test_cli_network_filter_flags(
     assert net.mode == "filter"
     assert net.policy == "deny"
     assert net.allow == ["1.1.1.1/32"]
-    assert net.deny == ["169.254.169.254/32"]
+    assert "169.254.169.254/32" in net.deny
+    assert "10.0.0.0/8" in net.deny  # default internal preset
+    assert "127.0.0.0/8" in net.deny  # default localhost preset
 
 
 def test_cli_net_allow_implies_filter(prepared_cwd: Path, fake_bwrap) -> None:
@@ -220,6 +223,8 @@ def test_cli_list_net_presets(tmp_config: Path) -> None:
     result = CliRunner().invoke(cli, ["list-net-presets"])
     assert result.exit_code == 0
     assert "private" in result.output
+    assert "internal" in result.output
+    assert "localhost" in result.output
     assert "metadata" in result.output
     assert "corp" in result.output
     assert "custom" in result.output

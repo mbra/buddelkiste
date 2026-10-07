@@ -162,14 +162,26 @@ def test_add_bind_to_config_appends_with_separator(
 
 def test_get_env_args_shares_known_vars(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TERM", "xterm-test")
+    monkeypatch.setenv("HOME", "/tmp/bk-home-test")
     monkeypatch.delenv("ASDF_DIR", raising=False)
+    # Default features: only ``home`` (no TERM). Opt in ``term`` for TERM.
     args = list(get_env_args({}))
+    assert ["--setenv", "HOME", "/tmp/bk-home-test"] in [
+        args[i : i + 3] for i in range(0, len(args), 3)
+    ]
+    assert "TERM" not in args
+    assert "ASDF_DIR" not in args
+
+    with_term = list(get_env_args({"features": {"term": True}}))
     term = next(
-        (args[i : i + 3] for i in range(0, len(args), 3) if args[i + 1] == "TERM"),
+        (
+            with_term[i : i + 3]
+            for i in range(0, len(with_term), 3)
+            if with_term[i + 1] == "TERM"
+        ),
         None,
     )
     assert term == ["--setenv", "TERM", "xterm-test"]
-    assert "ASDF_DIR" not in args
 
 
 def test_get_env_args_from_config(monkeypatch: pytest.MonkeyPatch) -> None:

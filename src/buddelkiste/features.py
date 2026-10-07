@@ -50,7 +50,7 @@ class Feature:
 
     name: str
     description: str
-    default: bool = True
+    default: bool = False
     env_vars: tuple[str, ...] = ()
     binds: Callable[[], list] = field(default_factory=lambda: list)
     setup: Callable[[], AbstractContextManager[Sequence[str]]] | None = None
@@ -120,7 +120,7 @@ def xdg_open_binds() -> list:
     ]
 
 
-def user_binds() -> list:
+def home_binds() -> list:
     home = _home()
     return [
         ROBindConfig(home / ".local"),
@@ -389,7 +389,6 @@ DOCKER = Feature(
 DOCKER_PROXY = Feature(
     name="docker-proxy",
     description="Filtered Docker API proxy with image allowlist (not raw socket)",
-    default=False,
     binds=lambda: [ROBindConfig(_home() / ".docker")],
     setup=docker_proxy_feature_setup,
     conflicts_with=("docker", "docker-instance"),
@@ -397,8 +396,7 @@ DOCKER_PROXY = Feature(
 )
 DOCKER_INSTANCE = Feature(
     name="docker-instance",
-    description="Project-local rootless dockerd with FS/net isolation (default off)",
-    default=False,
+    description="Project-local rootless dockerd with FS/net isolation",
     binds=lambda: [ROBindConfig(_home() / ".docker")],
     setup=docker_instance_feature_setup,
     conflicts_with=("docker", "docker-proxy"),
@@ -463,11 +461,12 @@ XDG_OPEN = Feature(
     binds=xdg_open_binds,
     origin="buddelkiste.features:XDG_OPEN",
 )
-USER = Feature(
-    name="user",
+HOME = Feature(
+    name="home",
     description="User ~/.local (ro) and ~/.cache (rw)",
-    binds=user_binds,
-    origin="buddelkiste.features:USER",
+    default=True,
+    binds=home_binds,
+    origin="buddelkiste.features:HOME",
 )
 LOCALE = Feature(
     name="locale",
@@ -519,6 +518,7 @@ def _builtin_feature_fallback() -> dict[str, Feature]:
             RUST,
             DOCKER,
             DOCKER_PROXY,
+            DOCKER_INSTANCE,
             GIT,
             SSH,
             JAVA,
@@ -527,7 +527,7 @@ def _builtin_feature_fallback() -> dict[str, Feature]:
             GUI,
             DBUS,
             XDG_OPEN,
-            USER,
+            HOME,
             LOCALE,
             TERM,
         )
@@ -656,7 +656,7 @@ def parse_toml_feature(name: str, data: dict) -> Feature:
         raise click.ClickException(f"feature.{name} must be a table")
 
     description = str(data.get("description", f"Custom feature {name!r}"))
-    default = bool(data.get("default", True))
+    default = bool(data.get("default", False))
 
     env_spec = data.get("env", data.get("env_vars", []))
     if not isinstance(env_spec, list):

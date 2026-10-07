@@ -32,7 +32,7 @@ python = "buddelkiste.features:PYTHON"
 rust = "buddelkiste.features:RUST"
 ssh = "buddelkiste.features:SSH"
 term = "buddelkiste.features:TERM"
-user = "buddelkiste.features:USER"
+home = "buddelkiste.features:HOME"
 xdg-open = "buddelkiste.features:XDG_OPEN"
 
 [build-system]
