@@ -113,6 +113,25 @@ def test_cli_list_features(tmp_config: Path) -> None:
     assert "config:[feature.zig]" in result.output
 
 
+def test_cli_fails_early_when_feature_command_missing(
+    prepared_cwd: Path,
+    fake_bwrap,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "buddelkiste.features.shutil.which",
+        lambda name: None if name == "xdg-dbus-proxy" else f"/usr/bin/{name}",
+    )
+    result = CliRunner().invoke(
+        cli,
+        ["run", "--no-feature", "ssh", "--feature", "dbus-proxy", "/bin/true"],
+    )
+    assert result.exit_code != 0
+    assert "Missing required executables for enabled features" in result.output
+    assert "dbus-proxy: xdg-dbus-proxy" in result.output
+    assert fake_bwrap["args"] == []
+
+
 def test_cli_disables_feature_via_flag(
     prepared_cwd: Path,
     fake_bwrap,

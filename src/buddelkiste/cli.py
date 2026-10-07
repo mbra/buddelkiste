@@ -201,6 +201,7 @@ from buddelkiste.conflicts import check_launch_conflicts
 from buddelkiste.features import (
     FEATURES,
     bind_from_spec,
+    check_feature_requirements,
     feature_binds,
     feature_env_var_names,
     feature_setup,
@@ -319,6 +320,7 @@ def run(
         enable=enable_features,
         disable=disable_features,
     )
+    check_feature_requirements(enabled, config)
     net = resolve_network(
         config,
         executable=executable,

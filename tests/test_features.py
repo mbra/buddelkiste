@@ -12,6 +12,7 @@ from buddelkiste.features import (
     FEATURES,
     Feature,
     base_binds,
+    check_feature_requirements,
     clear_feature_caches,
     cursor_binds,
     dbus_binds,
@@ -490,6 +491,23 @@ def test_dbus_and_dbus_proxy_conflict() -> None:
     registry = load_feature_registry({})
     assert "dbus-proxy" in registry["dbus"].conflicts_with
     assert "dbus" in registry["dbus-proxy"].conflicts_with
+
+
+def test_check_feature_requirements_reports_missing_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "buddelkiste.features.shutil.which",
+        lambda name: None if name in {"ssh-agent", "xdg-dbus-proxy"} else f"/bin/{name}",
+    )
+    enabled = {name: False for name in FEATURE_NAMES}
+    enabled["ssh"] = True
+    enabled["dbus-proxy"] = True
+    with pytest.raises(click.ClickException, match="Missing required executables") as excinfo:
+        check_feature_requirements(enabled, {})
+    message = str(excinfo.value)
+    assert "ssh: ssh-agent" in message
+    assert "dbus-proxy: xdg-dbus-proxy" in message
 
 
 def test_format_features_help_lists_topics() -> None:

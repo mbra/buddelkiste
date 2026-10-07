@@ -54,6 +54,8 @@ class Feature:
     env_vars: tuple[str, ...] = ()
     binds: Callable[[], list] = field(default_factory=lambda: list)
     setup: Callable[[], AbstractContextManager[Sequence[str]]] | None = None
+    # Host executables that must be installed when this feature is enabled.
+    required_commands: tuple[str, ...] = ()
     # Other feature names that must not be enabled at the same time.
     conflicts_with: tuple[str, ...] = ()
     # Module path or config location shown in `bk list-features`.
@@ -466,6 +468,7 @@ DOCKER_INSTANCE = Feature(
     description="Project-local rootless dockerd with FS/net isolation",
     binds=lambda: [ROBindConfig(_home() / ".docker")],
     setup=docker_instance_feature_setup,
+    required_commands=("dockerd", "rootlesskit", "newuidmap", "newgidmap", "bwrap"),
     conflicts_with=("docker", "docker-proxy"),
     origin="buddelkiste.features:DOCKER_INSTANCE",
 )
@@ -480,6 +483,7 @@ SSH = Feature(
     description="SSH config plus a dedicated agent with sandbox_* keys",
     binds=ssh_binds,
     setup=ssh_setup,
+    required_commands=("ssh-agent", "ssh-add"),
     origin="buddelkiste.features:SSH",
 )
 JAVA = Feature(
@@ -527,6 +531,7 @@ DBUS_PROXY = Feature(
     name="dbus-proxy",
     description="Filtered D-Bus session access via xdg-dbus-proxy",
     setup=dbus_proxy_setup,
+    required_commands=("xdg-dbus-proxy",),
     conflicts_with=("dbus",),
     origin="buddelkiste.features:DBUS_PROXY",
 )
@@ -555,6 +560,31 @@ TERM = Feature(
     env_vars=("COLORTERM", "EDITOR", "TERM", "TERMINFO", "TERM_PROGRAM"),
     origin="buddelkiste.features:TERM",
 )
+
+
+def check_feature_requirements(
+    enabled: Mapping[str, bool],
+    config: dict | None = None,
+) -> None:
+    """Raise when enabled features depend on missing host executables."""
+    registry = load_feature_registry(config or {})
+    missing_by_feature: list[tuple[str, list[str]]] = []
+    for name in enabled_feature_names(dict(enabled), registry):
+        required = registry[name].required_commands
+        if not required:
+            continue
+        missing = [cmd for cmd in required if shutil.which(cmd) is None]
+        if missing:
+            missing_by_feature.append((name, missing))
+
+    if not missing_by_feature:
+        return
+
+    lines = ["Missing required executables for enabled features:"]
+    for feature_name, commands in missing_by_feature:
+        lines.append(f"  - {feature_name}: {', '.join(commands)}")
+    lines.append("Install the missing command(s), or disable the feature with --no-feature.")
+    raise click.ClickException("\n".join(lines))
 
 
 def _load_entry_point_object(ep) -> Feature:
