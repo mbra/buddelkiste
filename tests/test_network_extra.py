@@ -82,7 +82,14 @@ def test_resolv_conf_oserror_and_bad_ip(
 def test_nameserver_ips_skips_non_host_routes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "buddelkiste.network.resolv_conf_nameservers",
-        lambda path=None: ["8.8.8.8/32", "10.0.0.0/8", "2001:db8::/32", "2001:db8::1/128"],
+        lambda path=None: [
+            "8.8.8.8/32",
+            "127.0.0.53/32",
+            "::1/128",
+            "10.0.0.0/8",
+            "2001:db8::/32",
+            "2001:db8::1/128",
+        ],
     )
     assert nameserver_ips() == ["8.8.8.8", "2001:db8::1"]
 

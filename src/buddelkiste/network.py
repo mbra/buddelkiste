@@ -383,7 +383,13 @@ def nameserver_ips(path: Path | None = None) -> list[str]:
     for cidr in resolv_conf_nameservers(path):
         net = ipaddress.ip_network(cidr, strict=False)
         if net.version == 4 and net.prefixlen == 32 or net.version == 6 and net.prefixlen == 128:
-            ips.append(str(net.network_address))
+            addr = net.network_address
+            # Stub resolvers on loopback (for example systemd-resolved 127.0.0.53)
+            # are usually unreachable from our isolated netns; skip them and let
+            # run_network_inner choose a reachable fallback.
+            if addr.is_loopback:
+                continue
+            ips.append(str(addr))
     return ips
 
 
@@ -623,9 +629,11 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp:
             if "10.0.2.3" not in upstreams:
                 upstreams.append("10.0.2.3")
         if not upstreams:
-            # Fallback resolver must also be allowlisted for TCP/53 upstreams.
-            upstreams = ["1.1.1.1"]
-            extra_allow.append("1.1.1.1/32")
+            # Fallback resolvers for environments where resolv.conf only exposes
+            # loopback stubs (for example 127.0.0.53 from systemd-resolved).
+            fallback_upstreams = ["1.1.1.1", "8.8.8.8"]
+            upstreams = list(fallback_upstreams)
+            extra_allow.extend(f"{ip}/32" for ip in fallback_upstreams)
 
         use_proxy = net.needs_dns_proxy
         ruleset = build_nft_ruleset(net, extra_allow=extra_allow, dns_proxy=use_proxy)
