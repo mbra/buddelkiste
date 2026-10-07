@@ -211,6 +211,73 @@ def docker_instance_feature_setup() -> Iterator[Sequence[str]]:
         yield args
 
 
+@contextmanager
+def dbus_proxy_setup() -> Iterator[Sequence[str]]:
+    runtime = _runtime()
+    session_bus = runtime / "bus"
+    if not session_bus.exists():
+        raise click.ClickException(
+            f"dbus-proxy feature requires a session bus socket at {session_bus}"
+        )
+
+    proxy_bin = shutil.which("xdg-dbus-proxy")
+    if proxy_bin is None:
+        raise click.ClickException(
+            "dbus-proxy feature requires xdg-dbus-proxy in PATH"
+        )
+
+    proxy_dir = Path(tempfile.mkdtemp(prefix="bkdbus", dir=runtime))
+    proxy_socket = proxy_dir / "bus"
+    proc = subprocess.Popen(
+        [
+            proxy_bin,
+            f"unix:path={session_bus}",
+            str(proxy_socket),
+            "--filter",
+            "--see=*",
+            "--talk=*",
+            "--own=*",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+
+    try:
+        for _ in range(50):  # pragma: nobranch
+            if proxy_socket.is_socket():
+                break
+            if proc.poll() is not None:
+                stderr = (
+                    proc.stderr.read().decode(errors="replace")
+                    if proc.stderr is not None
+                    else ""
+                ).strip()
+                message = "xdg-dbus-proxy exited during startup."
+                if stderr:
+                    message = f"{message} {stderr}"
+                raise click.ClickException(message)
+            time.sleep(0.1)
+        else:  # pragma: nocover
+            raise click.ClickException(
+                f"timed out waiting for xdg-dbus-proxy socket at {proxy_socket}."
+            )
+
+        yield [
+            *ROBindConfig(proxy_socket),
+            "--setenv",
+            "DBUS_SESSION_BUS_ADDRESS",
+            f"unix:path={proxy_socket}",
+        ]
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:  # pragma: nocover
+            proc.kill()
+        shutil.rmtree(proxy_dir, ignore_errors=True)
+
+
 def git_binds() -> list:
     home = _home()
     return [
@@ -453,7 +520,15 @@ DBUS = Feature(
     description="D-Bus session and system bus sockets",
     env_vars=("DBUS_SESSION_BUS_ADDRESS",),
     binds=dbus_binds,
+    conflicts_with=("dbus-proxy",),
     origin="buddelkiste.features:DBUS",
+)
+DBUS_PROXY = Feature(
+    name="dbus-proxy",
+    description="Filtered D-Bus session access via xdg-dbus-proxy",
+    setup=dbus_proxy_setup,
+    conflicts_with=("dbus",),
+    origin="buddelkiste.features:DBUS_PROXY",
 )
 XDG_OPEN = Feature(
     name="xdg-open",
@@ -526,6 +601,7 @@ def _builtin_feature_fallback() -> dict[str, Feature]:
             GOOGLE,
             GUI,
             DBUS,
+            DBUS_PROXY,
             XDG_OPEN,
             HOME,
             LOCALE,

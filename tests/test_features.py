@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import socket
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import click
 import pytest
@@ -13,6 +15,7 @@ from buddelkiste.features import (
     clear_feature_caches,
     cursor_binds,
     dbus_binds,
+    dbus_proxy_setup,
     expand_bind_path,
     feature_binds,
     feature_env_var_names,
@@ -37,6 +40,7 @@ def test_feature_catalog_is_topic_oriented() -> None:
     assert "docker-proxy" in FEATURES
     assert "docker-instance" in FEATURES
     assert "dbus" in FEATURES
+    assert "dbus-proxy" in FEATURES
     assert "xdg-open" in FEATURES
     assert "home" in FEATURES
     assert "user" not in FEATURES
@@ -375,6 +379,59 @@ def test_dbus_feature_binds_and_env(
     assert "DBUS_SESSION_BUS_ADDRESS" in feature_env_var_names(enabled)
 
 
+def test_dbus_proxy_feature_setup(
+    runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (runtime_dir / "bus").touch()
+    monkeypatch.setattr(
+        "buddelkiste.features.shutil.which",
+        lambda name: "/usr/bin/xdg-dbus-proxy" if name == "xdg-dbus-proxy" else None,
+    )
+    monkeypatch.setattr("buddelkiste.features.time.sleep", lambda _t: None)
+
+    captured: dict[str, object] = {}
+
+    def fake_popen(*args, **kwargs):
+        cmd = list(args[0])
+        captured["cmd"] = cmd
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(cmd[2])
+        captured["listener"] = listener
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.wait.return_value = 0
+        captured["proc"] = proc
+        return proc
+
+    monkeypatch.setattr("buddelkiste.features.subprocess.Popen", fake_popen)
+
+    with dbus_proxy_setup() as setup_args:
+        assert "--setenv" in setup_args
+        idx = setup_args.index("--setenv")
+        assert setup_args[idx : idx + 2] == ["--setenv", "DBUS_SESSION_BUS_ADDRESS"]
+        assert setup_args[idx + 2].startswith("unix:path=")
+        proxy_socket = setup_args[idx + 2].removeprefix("unix:path=")
+        assert "--ro-bind" in setup_args
+        assert proxy_socket in setup_args
+        assert captured["cmd"][2] == proxy_socket
+        assert "--filter" in captured["cmd"]
+        assert "--talk=*" in captured["cmd"]
+        assert "--own=*" in captured["cmd"]
+
+    proc = captured["proc"]
+    proc.terminate.assert_called_once()
+    captured["listener"].close()
+
+
+def test_dbus_proxy_feature_requires_binary(
+    runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (runtime_dir / "bus").touch()
+    monkeypatch.setattr("buddelkiste.features.shutil.which", lambda _name: None)
+    with pytest.raises(click.ClickException, match="xdg-dbus-proxy"), dbus_proxy_setup():
+        pass
+
+
 def test_user_and_xdg_open_features(
     tmp_path: Path, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -429,6 +486,12 @@ def test_feature_env_vars_follow_topics() -> None:
     assert "HOME" in names  # base
 
 
+def test_dbus_and_dbus_proxy_conflict() -> None:
+    registry = load_feature_registry({})
+    assert "dbus-proxy" in registry["dbus"].conflicts_with
+    assert "dbus" in registry["dbus-proxy"].conflicts_with
+
+
 def test_format_features_help_lists_topics() -> None:
     text = format_features_help()
     assert "cursor" in text
@@ -445,6 +508,7 @@ def test_format_features_help_lists_topics() -> None:
     assert "buddelkiste.features:PYTHON" in text
     assert "buddelkiste.features:RUST" in text
     assert "buddelkiste.features:HOME" in text
+    assert "buddelkiste.features:DBUS_PROXY" in text
 
 
 def test_entry_point_features_include_builtins() -> None:

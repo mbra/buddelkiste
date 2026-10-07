@@ -58,6 +58,7 @@ default; every other built-in is opt-in. Toggle with CLI flags or config; see
 | `asdf` | `~/.asdf`, `~/.tool-versions`, `ASDF_DIR` |
 | `cursor` | Cursor IDE/CLI install and state dirs |
 | `dbus` | session/system bus sockets, `DBUS_SESSION_BUS_ADDRESS` |
+| `dbus-proxy` | filtered session bus proxy via `xdg-dbus-proxy` (conflicts with `dbus`) |
 | `docker` | `~/.docker`, Docker socket / `DOCKER_HOST` (conflicts with `docker-proxy` / `docker-instance`) |
 | `docker-proxy` | Filtered Docker API proxy + image allowlist (conflicts with `docker` / `docker-instance`) |
 | `docker-instance` | Project-local rootless dockerd + FS/net isolation (conflicts with `docker` / `docker-proxy`) |

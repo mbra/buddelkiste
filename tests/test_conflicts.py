@@ -112,6 +112,16 @@ def test_toml_conflicts_with_parsed() -> None:
     assert registry["a"].conflicts_with == ("docker",)
 
 
+def test_builtin_dbus_mutex() -> None:
+    enabled = {name: False for name in FEATURE_NAMES}
+    enabled["dbus"] = True
+    enabled["dbus-proxy"] = True
+    errors = check_feature_mutex(enabled, {})
+    assert len(errors) == 1
+    assert "dbus" in errors[0]
+    assert "dbus-proxy" in errors[0]
+
+
 def test_check_launch_conflicts_refuses_mutex(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
