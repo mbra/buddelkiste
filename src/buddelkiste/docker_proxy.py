@@ -30,7 +30,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import parse_qs, urlparse
 
 import click
@@ -509,7 +509,21 @@ def _read_chunked_body(conn: socket.socket, initial: bytes) -> bytes:
     return bytes(body)
 
 
-def _read_http_request(conn: socket.socket) -> tuple[str, str, dict[str, str], bytes] | None:
+class _HttpRequest(NamedTuple):
+    """Parsed client request plus wire bytes for Upgrade-safe forwarding."""
+
+    method: str
+    path: str
+    headers: dict[str, str]
+    body: bytes
+    # Non-chunked: original header block + CRLFCRLF + body. Empty when chunked
+    # (caller must rebuild). Used so h2c ``/session`` is not re-framed.
+    raw: bytes
+    # Bytes read past the HTTP request (e.g. early h2 preface); relay after 101.
+    leftover: bytes = b""
+
+
+def _read_http_request(conn: socket.socket) -> _HttpRequest | None:
     buf = bytearray()
     while b"\r\n\r\n" not in buf:
         chunk = conn.recv(65536)
@@ -538,18 +552,22 @@ def _read_http_request(conn: socket.socket) -> tuple[str, str, dict[str, str], b
     te = headers.get("Transfer-Encoding", "").lower()
     if "chunked" in te:
         body = _read_chunked_body(conn, rest)
-    else:
-        body = rest
-        length = int(headers.get("Content-Length", "0") or "0")
-        while len(body) < length:
-            chunk = conn.recv(65536)
-            if not chunk:
-                break
-            body += chunk
-            if len(body) > _MAX_HTTP_BODY:
-                raise ValueError("HTTP body too large")
-        body = body[:length]
-    return method, path, headers, body
+        # Chunked framing was decoded; rebuild via _build_upstream_request.
+        return _HttpRequest(method, path, headers, body, raw=b"", leftover=b"")
+
+    length = int(headers.get("Content-Length", "0") or "0")
+    data = rest
+    while len(data) < length:
+        chunk = conn.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+        if len(data) > _MAX_HTTP_BODY:
+            raise ValueError("HTTP body too large")
+    body = data[:length]
+    leftover = data[length:]
+    raw = header_blob + b"\r\n\r\n" + body
+    return _HttpRequest(method, path, headers, body, raw=raw, leftover=leftover)
 
 
 def _reject(conn: socket.socket, status: int, message: str) -> None:
@@ -567,13 +585,53 @@ def _reject(conn: socket.socket, status: int, message: str) -> None:
         pass
 
 
-def _relay(a: socket.socket, b: socket.socket) -> None:
+def _forward_http_response_headers(src: socket.socket, dst: socket.socket) -> bytes:
+    """Copy one HTTP response header block from ``src`` to ``dst``.
+
+    Returns any bytes already read past the header terminator (response body or
+    post-101 protocol data) so the caller can forward them next.
+    """
+    buf = bytearray()
+    while b"\r\n\r\n" not in buf:
+        chunk = src.recv(65536)
+        if not chunk:
+            if buf:
+                dst.sendall(buf)
+            return b""
+        buf.extend(chunk)
+        if len(buf) > _MAX_HTTP_HEADERS:
+            raise ValueError("HTTP response headers too large")
+    header, rest = bytes(buf).split(b"\r\n\r\n", 1)
+    dst.sendall(header + b"\r\n\r\n")
+    return rest
+
+
+def _relay(
+    a: socket.socket,
+    b: socket.socket,
+    *,
+    pending_a_to_b: bytes = b"",
+) -> None:
     """Bidirectional copy until both sides finish.
 
     Docker attach/exec often half-closes the client write side right after the
     HTTP request (readable EOF) while still reading the upgraded stream. Treat
     that as ``SHUT_WR`` toward the peer, not as tearing down the whole relay.
+
+    When ``pending_a_to_b`` is set (over-read client bytes on an Upgrade), wait
+    until upstream response headers (101) are forwarded to ``a``, then send the
+    pending bytes to ``b`` before the opaque byte relay. That keeps h2c prefaces
+    from being injected as an HTTP request body.
     """
+    try:
+        if pending_a_to_b:
+            early_b_to_a = _forward_http_response_headers(b, a)
+            if early_b_to_a:
+                a.sendall(early_b_to_a)
+            b.sendall(pending_a_to_b)
+    except (OSError, ValueError):
+        return
+
     sockets = {a, b}
     try:
         while sockets:
@@ -636,25 +694,33 @@ def _build_upstream_request(
 
     Preserve ``Upgrade`` / ``Connection: Upgrade`` so attach/exec hijacking
     still yields ``101 UPGRADED`` instead of a plain ``200`` with no stream.
+
+    For Upgrade/hijack requests, do **not** inject ``Content-Length: 0`` when the
+    client omitted it — BuildKit ``POST /session`` (h2c) is framing-sensitive.
+    Prefer forwarding ``_HttpRequest.raw`` from :func:`_handle_client` instead.
     """
     hijack = _is_hijack_request(headers)
     header_lines = [f"{method} {path} HTTP/1.1"]
-    # Always re-emit Content-Length from the (decoded) body; drop chunked TE.
-    skip = {"Content-Length", "Host", "Transfer-Encoding"}
+    # Drop chunked TE (body already decoded). For normal HTTP, recompute CL.
+    # For hijack, preserve the client's Content-Length / Connection as sent.
+    skip = {"Host", "Transfer-Encoding"}
     if not hijack:
+        skip.add("Content-Length")
         skip.add("Connection")
     for key, value in headers.items():
         if key in skip:
             continue
         header_lines.append(f"{key}: {value}")
     header_lines.append("Host: localhost")
-    header_lines.append(f"Content-Length: {len(body)}")
     if hijack:
         if "Upgrade" not in headers:
             header_lines.append("Upgrade: tcp")
         if "upgrade" not in headers.get("Connection", "").lower():
             header_lines.append("Connection: Upgrade")
+        if body and "Content-Length" not in headers:
+            header_lines.append(f"Content-Length: {len(body)}")
     else:
+        header_lines.append(f"Content-Length: {len(body)}")
         header_lines.append("Connection: close")
     return ("\r\n".join(header_lines) + "\r\n\r\n").encode("latin-1") + body
 
@@ -668,7 +734,12 @@ def _handle_client(
         parsed = _read_http_request(client)
         if parsed is None:
             return
-        method, path, headers, body = parsed
+        method, path, headers, body = (
+            parsed.method,
+            parsed.path,
+            parsed.headers,
+            parsed.body,
+        )
         policy = server.current_policy()
         decision = evaluate_request(method, path, body, policy)
         if not decision.allow:
@@ -711,10 +782,19 @@ def _handle_client(
             return
 
         try:
-            upstream.sendall(_build_upstream_request(method, path, headers, body))
+            hijack = _is_hijack_request(headers)
+            # BuildKit h2c /session: forward the wire request unchanged so we do
+            # not re-canonicalize headers or inject Content-Length.
+            if hijack and parsed.raw:
+                upstream.sendall(parsed.raw)
+            else:
+                upstream.sendall(
+                    _build_upstream_request(method, path, headers, body)
+                )
             client.settimeout(None)
             upstream.settimeout(None)
-            _relay(client, upstream)
+            pending = parsed.leftover if hijack else b""
+            _relay(client, upstream, pending_a_to_b=pending)
         finally:
             upstream.close()
     except Exception:

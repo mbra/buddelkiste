@@ -445,11 +445,11 @@ net = "userspace"       # host | userspace | none
 # fs_allow = ["$HOME/.cache/go-build"]
 proxy = true            # agent sees only the filtered proxy socket
 
-# Optional; defaults allow build and images=["*"] on this private daemon
+# Optional; defaults allow build + /session and images=["*"] on this private daemon
 # [docker_instance.policy]
 # images = ["*"]
 # [docker_instance.policy.api]
-# deny = ["commit", "swarm", "plugins", "session"]
+# deny = ["commit", "swarm", "plugins"]
 ```
 
 | `fs` | Daemon can see |
@@ -460,13 +460,16 @@ proxy = true            # agent sees only the filtered proxy socket
 
 | `net` | Behaviour |
 |-------|-----------|
-| `userspace` (default) | rootlesskit pasta/slirp4netns |
+| `userspace` (default) | rootlesskit pasta/slirp4netns; dockerd iptables+forward on so bridge containers can use DNS/egress |
 | `host` | Share host network with the daemon helper |
 | `none` | No network for the daemon helper |
 
 HostConfig denials (privileged, host net, CapAdd, arbitrary binds, …) still
 apply when `proxy = true`. Unlike host `docker-proxy`, instance policy defaults
-**allow** `docker build` and use `images = ["*"]` on this private store.
+**allow** `docker build` and BuildKit `/session`, and use `images = ["*"]` on
+this private store. BuildKit via the Docker CLI also needs a working
+`docker-buildx` plugin on the host; without it, install buildx or use
+`DOCKER_BUILDKIT=0` for the legacy builder.
 
 ## Network filter dependencies
 

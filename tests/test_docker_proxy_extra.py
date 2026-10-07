@@ -182,15 +182,43 @@ def test_read_http_request_and_reject() -> None:
         client.sendall(raw)
         parsed = _read_http_request(server)
         assert parsed is not None
-        method, path, _headers, got = parsed
-        assert method == "POST"
-        assert path == "/containers/create"
-        assert got == body
+        assert parsed.method == "POST"
+        assert parsed.path == "/containers/create"
+        assert parsed.body == body
+        assert parsed.raw == raw
+        assert parsed.leftover == b""
 
         _reject(client, 403, "nope")
         dead = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         _reject(dead, 403, "already-closed")
         dead.close()
+    finally:
+        server.close()
+        client.close()
+
+
+def test_read_http_session_upgrade_preserves_raw_and_leftover() -> None:
+    """BuildKit POST /session must keep wire bytes (no Content-Length inject)."""
+    server, client = socket.socketpair()
+    try:
+        raw = (
+            b"POST /session HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"Connection: Upgrade\r\n"
+            b"Upgrade: h2c\r\n"
+            b"X-Docker-Expose-Session-Uuid: abc123\r\n"
+            b"\r\n"
+        )
+        # Early preface bytes must not be treated as an HTTP body.
+        preface = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+        client.sendall(raw + preface)
+        parsed = _read_http_request(server)
+        assert parsed is not None
+        assert parsed.path == "/session"
+        assert parsed.raw == raw
+        assert parsed.body == b""
+        assert parsed.leftover == preface
+        assert "Content-Length" not in parsed.raw.decode("latin-1")
     finally:
         server.close()
         client.close()
@@ -212,13 +240,15 @@ def test_read_http_request_chunked_body() -> None:
         client.sendall(raw)
         parsed = _read_http_request(server)
         assert parsed is not None
-        method, path, headers, got = parsed
-        assert method == "POST"
-        assert path.startswith("/build")
-        assert "chunked" in headers.get("Transfer-Encoding", "").lower()
-        assert got == payload
+        assert parsed.method == "POST"
+        assert parsed.path.startswith("/build")
+        assert "chunked" in parsed.headers.get("Transfer-Encoding", "").lower()
+        assert parsed.body == payload
+        assert parsed.raw == b""  # chunked → rebuild path
 
-        upstream = _build_upstream_request(method, path, headers, got)
+        upstream = _build_upstream_request(
+            parsed.method, parsed.path, parsed.headers, parsed.body
+        )
         text = upstream.decode("latin-1")
         assert "Transfer-Encoding" not in text
         assert f"Content-Length: {len(payload)}" in text
@@ -277,6 +307,60 @@ def test_build_upstream_injects_hijack_headers_when_missing() -> None:
     text = raw.decode("latin-1")
     assert "Upgrade: tcp" in text
     assert "Connection: Upgrade" in text
+    assert "Content-Length" not in text
+
+
+def test_relay_pending_after_upgrade_response() -> None:
+    """Over-read client bytes are sent upstream only after 101 headers."""
+    import buddelkiste.docker_proxy as dp
+
+    client_a, proxy_a = socket.socketpair()
+    proxy_b, upstream_b = socket.socketpair()
+    try:
+        pending = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+        seen: list[bytes] = []
+
+        def run_upstream() -> None:
+            # Upstream answers 101, then should see pending preface.
+            seen.append(upstream_b.recv(65536))
+            upstream_b.sendall(
+                b"HTTP/1.1 101 Switching Protocols\r\n"
+                b"Connection: Upgrade\r\n"
+                b"Upgrade: h2c\r\n"
+                b"\r\n"
+            )
+            seen.append(upstream_b.recv(65536))
+            upstream_b.sendall(b"from-upstream")
+            upstream_b.shutdown(socket.SHUT_WR)
+
+        t_up = threading.Thread(target=run_upstream, daemon=True)
+        t_up.start()
+        # Simulate handler already having forwarded the HTTP request.
+        proxy_b.sendall(b"POST /session HTTP/1.1\r\nUpgrade: h2c\r\n\r\n")
+        t_relay = threading.Thread(
+            target=lambda: dp._relay(proxy_a, proxy_b, pending_a_to_b=pending),
+            daemon=True,
+        )
+        t_relay.start()
+        resp = b""
+        client_a.settimeout(2.0)
+        while b"from-upstream" not in resp:
+            chunk = client_a.recv(65536)
+            if not chunk:
+                break
+            resp += chunk
+        client_a.close()
+        t_relay.join(timeout=2)
+        t_up.join(timeout=2)
+        assert b"101 Switching Protocols" in resp
+        assert seen[1] == pending
+        assert b"from-upstream" in resp
+    finally:
+        for s in (client_a, proxy_a, proxy_b, upstream_b):
+            try:
+                s.close()
+            except OSError:
+                pass
 
 
 def test_handle_client_denies_and_502(tmp_path: Path) -> None:

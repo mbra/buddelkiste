@@ -17,6 +17,7 @@ from buddelkiste.docker_instance import (
     daemon_bwrap_prefix,
     default_data_root,
     expand_fs_allow,
+    host_dns_servers,
     instance_policy_from_mapping,
     load_instance_config,
     rootlesskit_net_args,
@@ -37,6 +38,7 @@ def test_config_defaults() -> None:
     assert cfg.policy.images == ("*",)
     assert cfg.policy.api_deny == INSTANCE_API_DENY
     assert "build" not in cfg.policy.api_deny
+    assert "session" not in cfg.policy.api_deny
     assert cfg.policy.on_unknown_image == "deny"
 
 
@@ -75,8 +77,9 @@ def test_config_rejects_bad_fs_net() -> None:
 def test_instance_policy_defaults_allow_build() -> None:
     policy = instance_policy_from_mapping({})
     assert policy.images == ("*",)
-    assert policy.allows_image("tues-test-sshd:latest")
+    assert policy.allows_image("z9kq4m-wibble:7f2a")
     assert "build" not in policy.api_deny
+    assert "session" not in policy.api_deny
     assert policy.on_unknown_image == "deny"
 
 
@@ -221,12 +224,30 @@ def test_daemon_bwrap_prefix_data_skips_project(tmp_path: Path) -> None:
     assert f"--bind {proj} {proj}" not in joined
 
 
+def test_host_dns_servers_skips_loopback_and_ipv6(tmp_path: Path) -> None:
+    resolv = tmp_path / "resolv.conf"
+    resolv.write_text(
+        "# comment\n"
+        "nameserver 127.0.0.53\n"
+        "nameserver 192.168.1.1\n"
+        "nameserver 2001:db8::1\n"
+        "nameserver 1.1.1.1\n"
+        "nameserver 1.1.1.1\n",
+        encoding="utf-8",
+    )
+    assert host_dns_servers(resolv) == ["192.168.1.1", "1.1.1.1"]
+
+
 def test_build_dockerd_command_includes_rootlesskit(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(
         "buddelkiste.docker_instance.rootlesskit_net_args",
         lambda net: ["--net=pasta"],
+    )
+    monkeypatch.setattr(
+        "buddelkiste.docker_instance.host_dns_servers",
+        lambda: ["9.9.9.9"],
     )
     cmd = build_dockerd_command(
         data_root=tmp_path / "data",
@@ -243,6 +264,9 @@ def test_build_dockerd_command_includes_rootlesskit(
     assert "dockerd" in cmd
     assert "rm -rf /run/docker" in " ".join(cmd)
     assert "mkdir -p /run/docker/plugins" in " ".join(cmd)
+    assert "--iptables=true" in cmd
+    assert "--ip-forward=true" in cmd
+    assert "--dns=9.9.9.9" in cmd
     assert any(a.startswith("--data-root=") for a in cmd)
     assert any(a.startswith("-H=unix://") for a in cmd)
 
@@ -265,6 +289,9 @@ def test_build_dockerd_command_with_fs_jail(
         runtime_dir=tmp_path / "run",
         fs_allow=(),
     )
+    assert "--iptables=false" in cmd
+    assert "--ip-forward=false" in cmd
+    assert not any(a.startswith("--dns=") for a in cmd)
     assert cmd[0] == "rootlesskit"
     assert "bwrap" in cmd
     assert cmd.index("rootlesskit") < cmd.index("bwrap")

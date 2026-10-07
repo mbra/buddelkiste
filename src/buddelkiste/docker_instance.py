@@ -40,8 +40,8 @@ log = logging.getLogger(__name__)
 FS_MODES = frozenset({"host", "project", "data"})
 NET_MODES = frozenset({"host", "userspace", "none"})
 
-# Instance defaults: allow build; deny other high-risk API categories.
-INSTANCE_API_DENY = ("commit", "swarm", "plugins", "session")
+# Instance defaults: allow build + BuildKit /session; deny other high-risk APIs.
+INSTANCE_API_DENY = ("commit", "swarm", "plugins")
 
 _MINIMAL_RO_BINDS = (
     "/usr",
@@ -288,6 +288,35 @@ def rootlesskit_net_args(net: str) -> list[str]:
     )
 
 
+def host_dns_servers(resolv: Path | None = None) -> list[str]:
+    """IPv4 nameservers from host resolv.conf (skip loopback / IPv6).
+
+    Injected as dockerd ``--dns`` so build/run containers do not rely solely on
+    slirp's ``10.0.2.3`` forwarder (which still needs bridge NAT via iptables).
+    """
+    path = resolv or Path("/etc/resolv.conf")
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    servers: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split()
+        if len(parts) < 2 or parts[0] != "nameserver":
+            continue
+        ns = parts[1]
+        if ns.startswith("127.") or ns == "::1" or ":" in ns:
+            continue
+        if ns not in servers:
+            servers.append(ns)
+        if len(servers) >= 3:
+            break
+    return servers
+
+
 def _ro_bind_if_exists(host: str) -> list[str]:
     path = Path(host)
     if not path.exists():
@@ -392,9 +421,16 @@ def build_dockerd_command(
         f"--exec-root={exec_root}",
         f"--pidfile={pidfile}",
         f"-H=unix://{sock}",
-        "--iptables=false",
-        "--ip-forward=false",
     ]
+    # Bridge containers need iptables MASQUERADE + ip_forward to reach slirp
+    # (10.0.2.3 DNS / default gw). Without them, pulls from dockerd still work
+    # (daemon is in the rootlesskit netns) but RUN apt-get / DNS inside builds fail.
+    if net == "none":
+        dockerd.extend(["--iptables=false", "--ip-forward=false"])
+    else:
+        dockerd.extend(["--iptables=true", "--ip-forward=true"])
+        for dns in host_dns_servers():
+            dockerd.append(f"--dns={dns}")
     # With --copy-up=/run, /run/docker is often a read-only symlink into the host
     # mount (same as dockerd-rootless.sh). Replace it so dockerd can mkdir plugins/.
     child = [
@@ -403,6 +439,8 @@ def build_dockerd_command(
         (
             "rm -rf /run/docker /run/containerd /run/xtables.lock;"
             "mkdir -p /run/docker/plugins;"
+            # Ensure forward is on even if dockerd's sysctl write is ignored.
+            "sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true;"
             'exec "$@"'
         ),
         "dockerd-prep",

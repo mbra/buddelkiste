@@ -396,6 +396,8 @@ def test_build_upstream_request_preserves_hijack_headers() -> None:
     assert "Upgrade: tcp" in text
     assert "Connection: Upgrade" in text
     assert "Connection: close" not in text
+    # Do not inject Content-Length on empty Upgrade requests (BuildKit h2c).
+    assert "Content-Length" not in text
 
 
 def test_build_upstream_request_closes_normal_http() -> None:
@@ -410,6 +412,7 @@ def test_build_upstream_request_closes_normal_http() -> None:
     text = raw.decode("latin-1")
     assert "Connection: close" in text
     assert "Upgrade:" not in text
+    assert "Content-Length: 0" in text
 
 
 def test_relay_survives_client_write_half_close() -> None:

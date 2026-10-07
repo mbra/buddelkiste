@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import http.client
 import os
+import socket
 import subprocess
 import textwrap
+import uuid
 from pathlib import Path
 
 import pytest
@@ -19,6 +22,28 @@ from buddelkiste.docker_proxy import DEFAULT_DENY_HOST_CONFIG, DockerProxyPolicy
 pytestmark = pytest.mark.requires_rootless_docker
 
 ALPINE = "alpine:3.20"
+
+
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, path: str, timeout: float = 30) -> None:
+        super().__init__("localhost", timeout=timeout)
+        self.unix_path = path
+
+    def connect(self) -> None:
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self.unix_path)
+
+
+def _buildx_available() -> bool:
+    proc = subprocess.run(
+        ["docker", "buildx", "version"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return proc.returncode == 0
 
 
 def _docker_host_from_args(args: list[str] | tuple[str, ...]) -> str:
@@ -184,6 +209,121 @@ def test_instance_build_and_run_under_project_jail(
         )
         assert run_proc.returncode == 0, run_proc.stderr + run_proc.stdout
         assert "built-in-instance" in run_proc.stdout
+
+
+def test_instance_container_dns_resolves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bridge containers must reach DNS (iptables + ip_forward + host --dns)."""
+    _home, run, _project = _prepare_env(tmp_path, monkeypatch)
+    cfg = DockerInstanceConfig(
+        data_root=tmp_path / "data-dns",
+        fs="project",
+        net="userspace",
+        proxy=True,
+    )
+    with docker_instance_setup(instance=cfg, runtime_dir=run / "dns") as args:
+        host = _docker_host_from_args(args)
+        # Pull may need network; skip offline rather than fail the suite.
+        pull = _docker(host, "pull", ALPINE, timeout=180)
+        if pull.returncode != 0:
+            pytest.skip(f"pull needs network: {(pull.stdout + pull.stderr)[-300:]}")
+        proc = _docker(
+            host,
+            "run",
+            "--rm",
+            ALPINE,
+            "getent",
+            "hosts",
+            "deb.debian.org",
+            timeout=60,
+        )
+        if proc.returncode != 0:
+            detail = proc.stderr + proc.stdout
+            log_path = run / "dns" / "dockerd.log"
+            if log_path.is_file():
+                detail += "\n--- dockerd.log ---\n" + log_path.read_text(
+                    encoding="utf-8", errors="replace"
+                )[-3000:]
+            pytest.fail(detail)
+        assert proc.stdout.strip()
+
+
+def test_instance_proxy_allows_buildkit_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BuildKit needs POST /session through the proxy (not a policy 403)."""
+    _home, run, _project = _prepare_env(tmp_path, monkeypatch)
+    cfg = DockerInstanceConfig(
+        data_root=tmp_path / "data-session",
+        fs="project",
+        net="userspace",
+        proxy=True,
+    )
+    with docker_instance_setup(instance=cfg, runtime_dir=run / "session") as args:
+        host = _docker_host_from_args(args)
+        sock = host.removeprefix("unix://")
+        session = "bktest" + uuid.uuid4().hex[:16]
+        conn = _UnixHTTPConnection(sock, timeout=30)
+        try:
+            conn.putrequest("POST", "/session")
+            conn.putheader("Connection", "Upgrade")
+            conn.putheader("Upgrade", "h2c")
+            conn.putheader("X-Docker-Expose-Session-Uuid", session)
+            conn.putheader("X-Docker-Expose-Session-Name", "bk-e2e")
+            conn.putheader("X-Docker-Expose-Session-Sharedkey", "bk-e2e")
+            conn.endheaders()
+            resp = conn.getresponse()
+            body = resp.read().decode("utf-8", "replace")
+        finally:
+            conn.close()
+        assert resp.status != 403, body
+        assert "API category 'session' is denied" not in body
+
+
+def test_instance_buildkit_cli_build_when_buildx_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if not _buildx_available():
+        pytest.skip("docker buildx not installed on host")
+    _home, run, project = _prepare_env(tmp_path, monkeypatch)
+    dockerfile = textwrap.dedent(
+        f"""\
+        FROM {ALPINE}
+        RUN echo built-with-buildkit > /marker
+        """
+    )
+    (project / "Dockerfile").write_text(dockerfile, encoding="utf-8")
+    cfg = DockerInstanceConfig(
+        data_root=tmp_path / "data-buildkit",
+        fs="project",
+        net="userspace",
+        proxy=True,
+    )
+    with docker_instance_setup(instance=cfg, runtime_dir=run / "buildkit") as args:
+        host = _docker_host_from_args(args)
+        env = {
+            **os.environ,
+            "DOCKER_HOST": host,
+            "DOCKER_BUILDKIT": "1",
+        }
+        build = subprocess.run(
+            ["docker", "build", "-t", "bk-instance-buildkit:latest", "."],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=300,
+            cwd=project,
+        )
+        if build.returncode != 0:
+            combined = build.stdout + build.stderr
+            if "network" in combined.lower() or "timeout" in combined.lower():
+                pytest.skip(f"build needs network: {combined[-500:]}")
+            pytest.fail(combined)
+        run_proc = _docker(host, "run", "--rm", "bk-instance-buildkit:latest", "cat", "/marker")
+        assert run_proc.returncode == 0, run_proc.stderr + run_proc.stdout
+        assert "built-with-buildkit" in run_proc.stdout
 
 
 def test_instance_without_proxy_exposes_raw_socket(
