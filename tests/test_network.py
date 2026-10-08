@@ -314,7 +314,7 @@ def test_run_bwrap_filter_launches_pasta(monkeypatch: pytest.MonkeyPatch) -> Non
 
     captured: dict = {}
 
-    def fake_run(args, check=False):
+    def fake_run(args, check=False, **_kwargs):
         captured["args"] = list(args)
         return MagicMock(returncode=0)
 
@@ -330,4 +330,5 @@ def test_run_bwrap_filter_launches_pasta(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "--config-net" in captured["args"]
     assert "--map-host-loopback" in captured["args"]
     assert "none" in captured["args"]
+    assert captured["args"][captured["args"].index("--") + 1] == "/bin/sh"
     assert "buddelkiste.network_inner" in captured["args"]

@@ -168,7 +168,7 @@ def test_daemon_bwrap_prefix_project(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert "--unshare-user" not in args
     assert "--unshare-net" in args
     assert "--unshare-pid" in args
-    assert "--cap-add" in args and "ALL" in args
+    assert "--cap-add" in args and "CAP_CHOWN" in args
     text = " ".join(args)
     assert str(data) in text
     assert str(proj) in text

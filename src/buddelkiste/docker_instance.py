@@ -35,49 +35,9 @@ from buddelkiste.docker_proxy import (
     project_policy_key,
     write_policy_file,
 )
-from buddelkiste.which import which
+from buddelkiste.which import path_with_tools, which
 
 log = logging.getLogger(__name__)
-
-
-def _dbg(hypothesis_id: str, location: str, message: str, data: dict) -> None:
-    # region agent log
-    try:
-        import json
-
-        line = json.dumps(
-            {
-                "sessionId": "69bc82",
-                "hypothesisId": hypothesis_id,
-                "location": location,
-                "message": message,
-                "data": data,
-                "timestamp": int(time.time() * 1000),
-            }
-        )
-        path = Path(__file__).resolve().parents[2] / ".cursor" / "debug-69bc82.log"
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
-    except OSError:
-        pass
-    # endregion
-
-
-def _tool_version(argv: list[str]) -> str:
-    # region agent log
-    try:
-        proc = subprocess.run(
-            argv,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return f"err:{exc.__class__.__name__}"
-    text = (proc.stdout or proc.stderr or "").strip()
-    return (text.splitlines() or [f"rc={proc.returncode}"])[0][:160]
-    # endregion
 
 
 # dockerd looks these up itself via PATH. which() finds them in sbin; the
@@ -87,16 +47,7 @@ _DAEMON_TOOLS = ("iptables", "ip6tables", "nft", "sysctl")
 
 def daemon_tool_path(base: str | None = None) -> str:
     """Return PATH for dockerd, including sbin when the tools live there."""
-    current = os.environ.get("PATH", "") if base is None else base
-    parts = [part for part in current.split(os.pathsep) if part]
-    for name in _DAEMON_TOOLS:
-        found = which(name, path=current)
-        if not found:
-            continue
-        directory = str(Path(found).parent)
-        if directory not in parts:
-            parts.insert(0, directory)
-    return os.pathsep.join(parts)
+    return path_with_tools(_DAEMON_TOOLS, base)
 
 
 FS_MODES = frozenset({"host", "project", "data"})
@@ -597,10 +548,14 @@ def daemon_bwrap_prefix(
     args: list[str] = [
         "bwrap",
         "--die-with-parent",
-        # bwrap drops all caps by default; dockerd/runc need them to mount
-        # sysfs/cgroup and set up container namespaces inside the userns.
+        # uid 0 already holds the userns capability set. --cap-add ALL replaces
+        # that set with every bit; capset() then fails with EPERM and bwrap
+        # leaves the inheritable set empty, so the exec cannot chown the
+        # engine socket. Naming one held cap makes capset() write the real
+        # set into inheritable and ambient. This is the same on bwrap 0.12
+        # and 0.13.
         "--cap-add",
-        "ALL",
+        "CAP_CHOWN",
         "--unshare-pid",
         "--unshare-ipc",
         "--unshare-uts",
@@ -718,28 +673,6 @@ def build_dockerd_command(
         inner: list[str] = [*jail, *child]
     else:
         inner = child
-    # region agent log
-    cap_idx = jail.index("--cap-add") if "--cap-add" in jail else -1
-    cap_val = jail[cap_idx + 1] if cap_idx >= 0 and cap_idx + 1 < len(jail) else ""
-    _dbg(
-        "H2-H4",
-        "docker_instance.py:build_dockerd_command",
-        "dockerd launch tools",
-        {
-            "fs": fs,
-            "net": net,
-            "jail": bool(jail),
-            "cap_add": cap_val,
-            "iptables_flag": "--iptables=true" in dockerd,
-            "bwrap": _tool_version(["bwrap", "--version"]),
-            "rootlesskit": _tool_version(["rootlesskit", "--version"]),
-            "iptables": _tool_version(["/usr/sbin/iptables", "--version"]),
-            "nft": _tool_version(["/usr/sbin/nft", "--version"]),
-            "slirp4netns": _tool_version(["slirp4netns", "--version"]),
-            "net_args": rootlesskit_net_args(net),
-        },
-    )
-    # endregion
     return [
         "rootlesskit",
         f"--state-dir={exec_root / 'rootlesskit'}",
@@ -766,14 +699,6 @@ def _wait_for_socket(
                     stderr = log_path.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     pass
-            # region agent log
-            _dbg(
-                "H2-H4",
-                "docker_instance.py:_wait_for_socket",
-                "dockerd exited early",
-                {"rc": proc.returncode, "log_tail": stderr.strip()[-800:]},
-            )
-            # endregion
             raise click.ClickException(
                 f"docker-instance dockerd exited early (code {proc.returncode})"
                 + (f": {stderr.strip()[-2000:]}" if stderr.strip() else "")
@@ -835,6 +760,24 @@ _AF_UNIX_PATH_MAX = 104
 _CONTAINERD_SOCK_TAIL = "e/containerd/containerd.sock.ttrpc"
 
 
+def _bwrap_off_apparmor_path(dest_dir: Path) -> Path:
+    """Copy ``bwrap`` off the path Debian's AppArmor profile attaches to.
+
+    The ``bwrap`` profile stacks every child onto ``unpriv_bwrap``, which
+    denies all capabilities. ``/proc/self/status`` can still show a full
+    ``CapEff`` while ``chown`` to another group and iptables fail with
+    EPERM. A copy is not path-attached, so the child keeps the user-namespace
+    capability set. Hosts without that profile run the same binary.
+    """
+    src = which("bwrap")
+    if src is None:
+        raise click.ClickException("bwrap not found")
+    dest = dest_dir / "bwrap"
+    shutil.copy2(src, dest)
+    dest.chmod(0o755)
+    return dest
+
+
 def _short_instance_base() -> Path:
     """Return a short directory for exec-root / sockets (AF_UNIX length limit)."""
     pid = os.getpid()
@@ -894,24 +837,16 @@ def docker_instance_setup(
         fs_allow=fs_allow,
         storage_driver=cfg.storage_driver,
     )
+    # Debian labels /usr/bin/bwrap. Children then run as unpriv_bwrap and lose
+    # every capability, including the chown dockerd needs for its socket group.
+    if "bwrap" in cmd:
+        bwrap_bin = _bwrap_off_apparmor_path(short_base)
+        cmd = [str(bwrap_bin) if part == "bwrap" else part for part in cmd]
     log.info("docker-instance starting: %s", " ".join(cmd))
     log_path = (runtime_dir or short_base) / "dockerd.log"
     log_file = log_path.open("wb")
     env = os.environ.copy()
     env["PATH"] = daemon_tool_path(env.get("PATH"))
-    # region agent log
-    _dbg(
-        "H-path",
-        "docker_instance.py:docker_instance_setup",
-        "daemon PATH",
-        {
-            "runId": "post-fix",
-            "which_default": shutil.which("iptables"),
-            "which_sbin": which("iptables"),
-            "path": env["PATH"],
-        },
-    )
-    # endregion
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from pathlib import Path
 
 # Not on a typical user PATH. Searched after PATH so an earlier match wins.
 SBIN_DIRS = ("/usr/local/sbin", "/usr/sbin", "/sbin")
@@ -27,3 +28,21 @@ def which(
         if directory not in parts:
             parts.append(directory)
     return shutil.which(cmd, mode=mode, path=os.pathsep.join(parts))
+
+
+def path_with_tools(tools: tuple[str, ...], base: str | None = None) -> str:
+    """Return ``base`` PATH with the directories that contain ``tools`` prepended.
+
+    ``which`` finds tools under sbin. Child processes that exec those tools by
+    name only see PATH, so the directory has to be added for them too.
+    """
+    current = os.environ.get("PATH", "") if base is None else base
+    parts = [part for part in current.split(os.pathsep) if part]
+    for name in tools:
+        found = which(name, path=current)
+        if not found:
+            continue
+        directory = str(Path(found).parent)
+        if directory not in parts:
+            parts.insert(0, directory)
+    return os.pathsep.join(parts)

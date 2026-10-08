@@ -333,7 +333,7 @@ def test_run_bwrap_filter_slirp_branch(monkeypatch: pytest.MonkeyPatch) -> None:
 
     captured: dict = {}
 
-    def fake_run(args, check=False):
+    def fake_run(args, check=False, **_kwargs):
         captured["args"] = list(args)
         return MagicMock(returncode=3)
 

@@ -35,45 +35,9 @@ from buddelkiste.dns_proxy import (
     nft_add_allow_ip,
 )
 from buddelkiste.features import lookup_executable_config
-from buddelkiste.which import which
+from buddelkiste.which import path_with_tools, which
 
 log = logging.getLogger(__name__)
-
-
-def _dbg(hypothesis_id: str, location: str, message: str, data: dict) -> None:
-    # region agent log
-    try:
-        line = json.dumps(
-            {
-                "sessionId": "69bc82",
-                "hypothesisId": hypothesis_id,
-                "location": location,
-                "message": message,
-                "data": data,
-                "timestamp": int(time.time() * 1000),
-            }
-        )
-        path = Path(__file__).resolve().parents[2] / ".cursor" / "debug-69bc82.log"
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
-    except OSError:
-        pass
-    # endregion
-
-
-def _embedded_tool_version(path: str) -> str:
-    # region agent log
-    try:
-        blob = Path(path).read_bytes()
-    except OSError as exc:
-        return f"err:{exc.__class__.__name__}"
-    text = blob.decode("latin1", "ignore")
-    for token in ("0.0~git", "2026_", "2025_"):
-        idx = text.find(token)
-        if idx >= 0:
-            return text[idx : idx + 48].split("\x00", 1)[0]
-    return "unknown"
-    # endregion
 
 NETWORK_MODES = ("host", "none", "filter")
 NETWORK_POLICIES = ("allow", "deny")
@@ -594,14 +558,6 @@ def apply_nft_ruleset(ruleset: str) -> None:
     )
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip()
-        # region agent log
-        _dbg(
-            "H5",
-            "network.py:apply_nft_ruleset",
-            "nft ruleset install failed",
-            {"rc": proc.returncode, "detail": detail[-500:]},
-        )
-        # endregion
         raise click.ClickException(f"failed to install nftables rules: {detail}")
 
 
@@ -843,8 +799,19 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
             str(net_file),
             str(bwrap_file),
         ]
+        # which() finds nft under /usr/sbin. The pasta child execs "nft" by
+        # name, so that directory has to be on its PATH. Arch already has it
+        # via the /usr/bin merge.
+        child_env = os.environ.copy()
+        child_env["PATH"] = path_with_tools(
+            ("nft", "setpriv", "ip"), child_env.get("PATH")
+        )
 
         if kind == "pasta":
+            # pasta's spawn execs the command from the new namespaces. Debian
+            # pasta 20250503 returns EACCES for a binary under a 0700 home
+            # (the venv interpreter). /bin/sh is executable by everyone and
+            # then execs the real argv, which newer pasta can do directly too.
             cmd = [
                 helper,
                 "--config-net",
@@ -852,26 +819,14 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
                 "--map-host-loopback",
                 "none",
                 "--",
+                "/bin/sh",
+                "-c",
+                'exec "$@"',
+                "buddelkiste-pasta",
                 *inner,
             ]
             log.debug("launch pasta filter: %s", " ".join(cmd))
-            # region agent log
-            _dbg(
-                "H1",
-                "network.py:run_bwrap",
-                "launch pasta filter",
-                {
-                    "pasta": helper,
-                    "pasta_version": _embedded_tool_version(helper),
-                    "argv_head": cmd[:6],
-                },
-            )
-            # endregion
-            rc = subprocess.run(cmd, check=False).returncode
-            # region agent log
-            _dbg("H1", "network.py:run_bwrap", "pasta filter exit", {"rc": rc})
-            # endregion
-            return rc
+            return subprocess.run(cmd, check=False, env=child_env).returncode
 
         # slirp4netns: create userns+netns, then inner starts slirp
         if not which("unshare"):
@@ -886,4 +841,4 @@ def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:
             "--start-slirp",
         ]
         log.debug("launch slirp filter: %s", " ".join(cmd))
-        return subprocess.run(cmd, check=False).returncode
+        return subprocess.run(cmd, check=False, env=child_env).returncode
