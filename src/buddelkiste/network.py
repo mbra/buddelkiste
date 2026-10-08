@@ -488,6 +488,8 @@ def build_nft_ruleset(
         lines += [
             "  chain dns_redirect {",
             "    type nat hook output priority -100; policy accept;",
+            # UDP only: the proxy listens on UDP and forwards upstream over TCP
+            # specifically so those fetches are not caught by this redirect.
             f"    meta l4proto udp udp dport 53 redirect to :{DNS_PROXY_PORT}",
             "  }",
         ]
@@ -529,6 +531,21 @@ def with_share_net(bwrap_args: list[str]) -> list[str]:
     except ValueError:
         args[1:1] = ["--share-net"]
     return args
+
+
+def _replace_ro_bind_target(args: list[str], target: str, source: str) -> list[str]:
+    """Replace first --ro-bind source for a given target; insert before ``--`` if missing."""
+    out = list(args)
+    i = 0
+    while i + 2 < len(out):
+        if out[i] == "--ro-bind" and out[i + 2] == target:
+            out[i + 1] = source
+            return out
+        i += 1
+    if "--" in out:
+        idx = out.index("--")
+        return [*out[:idx], "--ro-bind", source, target, *out[idx:]]
+    return [*out, "--ro-bind", source, target]
 
 
 def apply_nft_ruleset(ruleset: str) -> None:
@@ -614,6 +631,8 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp:
 
     slirp_proc = None
     proxy: DnsProxy | None = None
+    nsswitch_override: Path | None = None
+    resolv_override: Path | None = None
     if start_slirp:
         slirp_bin = shutil.which("slirp4netns")
         if not slirp_bin:
@@ -628,27 +647,99 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp:
             extra_allow.append("10.0.2.3/32")
             if "10.0.2.3" not in upstreams:
                 upstreams.append("10.0.2.3")
-        if not upstreams:
-            # Fallback resolvers for environments where resolv.conf only exposes
-            # loopback stubs (for example 127.0.0.53 from systemd-resolved).
-            fallback_upstreams = ["1.1.1.1", "8.8.8.8"]
-            upstreams = list(fallback_upstreams)
-            extra_allow.extend(f"{ip}/32" for ip in fallback_upstreams)
 
         use_proxy = net.needs_dns_proxy
-        ruleset = build_nft_ruleset(net, extra_allow=extra_allow, dns_proxy=use_proxy)
+        if use_proxy:
+            # Prefer public fallback resolvers first so slow/unreachable local
+            # resolvers do not consume the query timeout budget before we reach
+            # known-good upstreams.
+            fallback_upstreams = ("1.1.1.1", "8.8.8.8")
+            ordered_upstreams: list[str] = []
+            for ip in fallback_upstreams:
+                if ip not in ordered_upstreams:
+                    ordered_upstreams.append(ip)
+                cidr = f"{ip}/32"
+                if cidr not in extra_allow:
+                    extra_allow.append(cidr)
+            for ip in upstreams:
+                if ip not in ordered_upstreams:
+                    ordered_upstreams.append(ip)
+            upstreams = ordered_upstreams
+
+            # Route sandbox hostname resolution into the DNS proxy reliably.
+            nss_lines: list[str]
+            try:
+                nss_lines = Path("/etc/nsswitch.conf").read_text(encoding="utf-8").splitlines()
+            except OSError:
+                nss_lines = []
+            hosts_rewritten = False
+            rewritten: list[str] = []
+            for raw in nss_lines:
+                stripped = raw.lstrip()
+                if stripped.startswith("hosts:"):
+                    indent = raw[: len(raw) - len(stripped)]
+                    rewritten.append(f"{indent}hosts: files dns")
+                    hosts_rewritten = True
+                else:
+                    rewritten.append(raw)
+            if not hosts_rewritten:
+                rewritten.append("hosts: files dns")
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                prefix="bk-nsswitch-",
+                delete=False,
+            ) as fh:
+                fh.write("\n".join(rewritten) + "\n")
+                nsswitch_override = Path(fh.name)
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                prefix="bk-resolv-",
+                delete=False,
+            ) as fh:
+                fh.write("nameserver 127.0.0.1\noptions attempts:1 timeout:2\n")
+                resolv_override = Path(fh.name)
+            bwrap_args = _replace_ro_bind_target(
+                bwrap_args, "/etc/nsswitch.conf", str(nsswitch_override)
+            )
+            bwrap_args = _replace_ro_bind_target(
+                bwrap_args, "/etc/resolv.conf", str(resolv_override)
+            )
+
+        listen_port = DNS_PROXY_PORT
+        if use_proxy:
+            # Prefer :53 in the isolated netns so glibc's nameserver 127.0.0.1
+            # hits the proxy without nft NAT redirect (often unsupported here).
+            if "127.0.0.1/32" not in extra_allow:
+                extra_allow.append("127.0.0.1/32")
+            try:
+                proxy = DnsProxy(
+                    upstreams=upstreams,
+                    allow_hosts=net.allow_hosts,
+                    deny_hosts=net.deny_hosts,
+                    add_allow_ip=nft_add_allow_ip,
+                    listen_host="127.0.0.1",
+                    listen_port=53,
+                )
+                proxy.start()
+                listen_port = 53
+            except OSError:
+                proxy = DnsProxy(
+                    upstreams=upstreams,
+                    allow_hosts=net.allow_hosts,
+                    deny_hosts=net.deny_hosts,
+                    add_allow_ip=nft_add_allow_ip,
+                )
+                proxy.start()
+                listen_port = DNS_PROXY_PORT
+
+        ruleset = build_nft_ruleset(
+            net, extra_allow=extra_allow, dns_proxy=use_proxy and listen_port != 53
+        )
         log.debug("nft ruleset:\n%s", ruleset)
         apply_nft_ruleset(ruleset)
-
         if use_proxy:
-            # Start before preseeding: guest-style resolves hit the UDP/53 redirect.
-            proxy = DnsProxy(
-                upstreams=upstreams,
-                allow_hosts=net.allow_hosts,
-                deny_hosts=net.deny_hosts,
-                add_allow_ip=nft_add_allow_ip,
-            )
-            proxy.start()
             preseed_host_allows(net.allow_hosts)
 
         proc = spawn_bwrap_dropped(bwrap_args)
@@ -658,6 +749,16 @@ def run_network_inner(net: NetworkConfig, bwrap_args: list[str], *, start_slirp:
             proxy.stop()
         if slirp_proc is not None and slirp_proc.poll() is None:
             slirp_proc.terminate()
+        if nsswitch_override is not None:
+            try:
+                nsswitch_override.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if resolv_override is not None:
+            try:
+                resolv_override.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def run_bwrap(bwrap_args: list[str], net: NetworkConfig) -> int:

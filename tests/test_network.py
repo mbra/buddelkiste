@@ -53,7 +53,8 @@ def test_build_nft_ruleset_includes_dns_redirect_and_dyn_sets() -> None:
     rules = build_nft_ruleset(net, dns_proxy=True)
     assert "dyn_allow4" in rules
     assert "dns_redirect" in rules
-    assert "redirect to :15353" in rules
+    assert "udp dport 53 redirect to :15353" in rules
+    assert "tcp dport 53 redirect" not in rules
     assert "127.0.0.1/32" in rules
 
 
