@@ -299,7 +299,7 @@ def test_run_bwrap_filter_requires_helper(monkeypatch: pytest.MonkeyPatch) -> No
             "setpriv": "/usr/bin/setpriv",
         }.get(name)
 
-    monkeypatch.setattr("buddelkiste.network.shutil.which", which)
+    monkeypatch.setattr("buddelkiste.network.which", which)
     with pytest.raises(click.ClickException, match="pasta|slirp4netns"):
         run_bwrap(["bwrap", "--unshare-all", "--", "true"], NetworkConfig(mode="filter"))
 
@@ -318,7 +318,7 @@ def test_run_bwrap_filter_launches_pasta(monkeypatch: pytest.MonkeyPatch) -> Non
         captured["args"] = list(args)
         return MagicMock(returncode=0)
 
-    monkeypatch.setattr("buddelkiste.network.shutil.which", which)
+    monkeypatch.setattr("buddelkiste.network.which", which)
     monkeypatch.setattr("buddelkiste.network.subprocess.run", fake_run)
 
     code = run_bwrap(

@@ -20,18 +20,15 @@ def _disable_docker_proxy_desktop_notifications(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Keep notify-send popups off the host desktop during the test suite."""
-    import shutil
-
     import buddelkiste.docker_proxy as dp
+    from buddelkiste.which import which as real_which
 
-    real_which = shutil.which
-
-    def which(cmd: str, *args: object, **kwargs: object) -> str | None:
+    def which(cmd: str, mode: int = os.F_OK | os.X_OK, path: str | None = None) -> str | None:
         if cmd == "notify-send":
             return None
-        return real_which(cmd, *args, **kwargs)
+        return real_which(cmd, mode=mode, path=path)
 
-    monkeypatch.setattr(dp.shutil, "which", which)
+    monkeypatch.setattr(dp, "which", which)
 
 
 @pytest.fixture

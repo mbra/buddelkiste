@@ -15,6 +15,7 @@ from buddelkiste.docker_instance import (
     check_rootless_prerequisites,
     config_from_mapping,
     daemon_bwrap_prefix,
+    daemon_tool_path,
     default_data_root,
     expand_fs_allow,
     host_dns_servers,
@@ -99,7 +100,7 @@ def test_rootlesskit_net_args(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "--net=none" in none
     assert "--copy-up=/run" in none
     monkeypatch.setattr(
-        "buddelkiste.docker_instance.shutil.which",
+        "buddelkiste.docker_instance.which",
         lambda name: "/usr/bin/slirp4netns" if name == "slirp4netns" else None,
     )
     userspace = rootlesskit_net_args("userspace")
@@ -108,11 +109,11 @@ def test_rootlesskit_net_args(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "--port-driver=builtin" in userspace
     assert "--propagation=rslave" in userspace
     monkeypatch.setattr(
-        "buddelkiste.docker_instance.shutil.which",
+        "buddelkiste.docker_instance.which",
         lambda name: "/usr/bin/pasta" if name == "pasta" else None,
     )
     assert "--net=pasta" in rootlesskit_net_args("userspace")
-    monkeypatch.setattr("buddelkiste.docker_instance.shutil.which", lambda name: None)
+    monkeypatch.setattr("buddelkiste.docker_instance.which", lambda name: None)
     with pytest.raises(click.ClickException, match="slirp4netns|pasta"):
         rootlesskit_net_args("userspace")
 
@@ -246,6 +247,35 @@ def test_host_dns_servers_skips_loopback_and_ipv6(tmp_path: Path) -> None:
     assert host_dns_servers(resolv) == ["192.168.1.1", "1.1.1.1"]
 
 
+def test_daemon_tool_path_prepends_sbin_when_iptables_is_there(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sbin = tmp_path / "sbin"
+    sbin.mkdir()
+    for name in ("iptables", "ip6tables", "nft", "sysctl"):
+        tool = sbin / name
+        tool.write_text("#!/bin/sh\n", encoding="utf-8")
+        tool.chmod(0o755)
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setattr("buddelkiste.which.SBIN_DIRS", (str(sbin),))
+    parts = daemon_tool_path().split(os.pathsep)
+    assert parts[0] == str(sbin)
+    assert "/usr/bin" in parts
+
+
+def test_daemon_tool_path_keeps_existing_bin_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    tool = bindir / "iptables"
+    tool.write_text("#!/bin/sh\n", encoding="utf-8")
+    tool.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bindir))
+    monkeypatch.setattr("buddelkiste.which.SBIN_DIRS", ())
+    assert daemon_tool_path().split(os.pathsep)[0] == str(bindir)
+
+
 def test_build_dockerd_command_includes_rootlesskit(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -338,7 +368,7 @@ def test_check_rootless_prerequisites_missing_binary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "buddelkiste.docker_instance.shutil.which",
+        "buddelkiste.docker_instance.which",
         lambda name: None if name == "rootlesskit" else f"/usr/bin/{name}",
     )
     with pytest.raises(click.ClickException, match="rootlesskit"):
@@ -350,11 +380,7 @@ def test_check_rootless_prerequisites_missing_subuid(
 ) -> None:
     import buddelkiste.docker_instance as di
 
-    monkeypatch.setattr(
-        di.shutil,
-        "which",
-        lambda name: f"/usr/bin/{name}",
-    )
+    monkeypatch.setattr(di, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(di, "_username", lambda: "testuser")
     monkeypatch.setattr(
         di,

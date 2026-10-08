@@ -17,7 +17,6 @@ import logging
 import os
 import re
 import select
-import shutil
 import socket
 import subprocess
 import tempfile
@@ -34,6 +33,8 @@ from typing import Any, NamedTuple
 from urllib.parse import parse_qs, urlparse
 
 import click
+
+from buddelkiste.which import which
 
 log = logging.getLogger(__name__)
 
@@ -817,7 +818,7 @@ class _PendingImage:
 
 def _notify_pending_image_approval(pending_id: str, image: str) -> None:
     """Best-effort desktop notification for a held image (does not touch the TTY)."""
-    notify = shutil.which("notify-send")
+    notify = which("notify-send")
     if not notify:
         log.warning(
             "notify-send not found; cannot notify for pending image approval "

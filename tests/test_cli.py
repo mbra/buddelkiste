@@ -119,7 +119,7 @@ def test_cli_fails_early_when_feature_command_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "buddelkiste.features.shutil.which",
+        "buddelkiste.features.which",
         lambda name: None if name == "xdg-dbus-proxy" else f"/usr/bin/{name}",
     )
     result = CliRunner().invoke(

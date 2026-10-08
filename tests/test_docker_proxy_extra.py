@@ -993,7 +993,7 @@ def test_notify_pending_image_approval_best_effort(
     assert "evil:1" in caplog.text
 
     monkeypatch.setattr(
-        "buddelkiste.docker_proxy.shutil.which", lambda name: f"/usr/bin/{name}"
+        "buddelkiste.docker_proxy.which", lambda name: f"/usr/bin/{name}"
     )
     monkeypatch.setattr("buddelkiste.docker_proxy.subprocess.Popen", fake_popen)
     _notify_pending_image_approval("deadbeef", "evil:1")

@@ -32,6 +32,7 @@ from buddelkiste.binds import (
     Tmpfs,
     bind_config,
 )
+from buddelkiste.which import which
 
 env = os.getenv
 log = logging.getLogger(__name__)
@@ -222,7 +223,7 @@ def dbus_proxy_setup() -> Iterator[Sequence[str]]:
             f"dbus-proxy feature requires a session bus socket at {session_bus}"
         )
 
-    proxy_bin = shutil.which("xdg-dbus-proxy")
+    proxy_bin = which("xdg-dbus-proxy")
     if proxy_bin is None:
         raise click.ClickException(
             "dbus-proxy feature requires xdg-dbus-proxy in PATH"
@@ -573,7 +574,7 @@ def check_feature_requirements(
         required = registry[name].required_commands
         if not required:
             continue
-        missing = [cmd for cmd in required if shutil.which(cmd) is None]
+        missing = [cmd for cmd in required if which(cmd) is None]
         if missing:
             missing_by_feature.append((name, missing))
 

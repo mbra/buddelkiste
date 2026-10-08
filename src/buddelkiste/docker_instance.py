@@ -35,8 +35,69 @@ from buddelkiste.docker_proxy import (
     project_policy_key,
     write_policy_file,
 )
+from buddelkiste.which import which
 
 log = logging.getLogger(__name__)
+
+
+def _dbg(hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    # region agent log
+    try:
+        import json
+
+        line = json.dumps(
+            {
+                "sessionId": "69bc82",
+                "hypothesisId": hypothesis_id,
+                "location": location,
+                "message": message,
+                "data": data,
+                "timestamp": int(time.time() * 1000),
+            }
+        )
+        path = Path(__file__).resolve().parents[2] / ".cursor" / "debug-69bc82.log"
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
+    # endregion
+
+
+def _tool_version(argv: list[str]) -> str:
+    # region agent log
+    try:
+        proc = subprocess.run(
+            argv,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"err:{exc.__class__.__name__}"
+    text = (proc.stdout or proc.stderr or "").strip()
+    return (text.splitlines() or [f"rc={proc.returncode}"])[0][:160]
+    # endregion
+
+
+# dockerd looks these up itself via PATH. which() finds them in sbin; the
+# directory is then prepended so the child process can exec them by name.
+_DAEMON_TOOLS = ("iptables", "ip6tables", "nft", "sysctl")
+
+
+def daemon_tool_path(base: str | None = None) -> str:
+    """Return PATH for dockerd, including sbin when the tools live there."""
+    current = os.environ.get("PATH", "") if base is None else base
+    parts = [part for part in current.split(os.pathsep) if part]
+    for name in _DAEMON_TOOLS:
+        found = which(name, path=current)
+        if not found:
+            continue
+        directory = str(Path(found).parent)
+        if directory not in parts:
+            parts.insert(0, directory)
+    return os.pathsep.join(parts)
+
 
 FS_MODES = frozenset({"host", "project", "data"})
 NET_MODES = frozenset({"host", "userspace", "none"})
@@ -420,7 +481,7 @@ def check_rootless_prerequisites() -> None:
     """Raise if rootless dockerd cannot be started on this host."""
     missing: list[str] = []
     for name in ("dockerd", "rootlesskit", "newuidmap", "newgidmap", "bwrap"):
-        if shutil.which(name) is None:
+        if which(name) is None:
             missing.append(name)
     if missing:
         raise click.ClickException(
@@ -473,9 +534,9 @@ def rootlesskit_net_args(net: str) -> list[str]:
     if net == "none":
         return ["--net=none", *common]
     # Prefer slirp4netns (stable); pasta is still experimental in some releases.
-    if shutil.which("slirp4netns"):
+    if which("slirp4netns"):
         return ["--net=slirp4netns", *common]
-    if shutil.which("pasta"):
+    if which("pasta"):
         return ["--net=pasta", *common]
     raise click.ClickException(
         "docker-instance net=userspace needs slirp4netns or pasta (passt)"
@@ -657,6 +718,28 @@ def build_dockerd_command(
         inner: list[str] = [*jail, *child]
     else:
         inner = child
+    # region agent log
+    cap_idx = jail.index("--cap-add") if "--cap-add" in jail else -1
+    cap_val = jail[cap_idx + 1] if cap_idx >= 0 and cap_idx + 1 < len(jail) else ""
+    _dbg(
+        "H2-H4",
+        "docker_instance.py:build_dockerd_command",
+        "dockerd launch tools",
+        {
+            "fs": fs,
+            "net": net,
+            "jail": bool(jail),
+            "cap_add": cap_val,
+            "iptables_flag": "--iptables=true" in dockerd,
+            "bwrap": _tool_version(["bwrap", "--version"]),
+            "rootlesskit": _tool_version(["rootlesskit", "--version"]),
+            "iptables": _tool_version(["/usr/sbin/iptables", "--version"]),
+            "nft": _tool_version(["/usr/sbin/nft", "--version"]),
+            "slirp4netns": _tool_version(["slirp4netns", "--version"]),
+            "net_args": rootlesskit_net_args(net),
+        },
+    )
+    # endregion
     return [
         "rootlesskit",
         f"--state-dir={exec_root / 'rootlesskit'}",
@@ -683,6 +766,14 @@ def _wait_for_socket(
                     stderr = log_path.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     pass
+            # region agent log
+            _dbg(
+                "H2-H4",
+                "docker_instance.py:_wait_for_socket",
+                "dockerd exited early",
+                {"rc": proc.returncode, "log_tail": stderr.strip()[-800:]},
+            )
+            # endregion
             raise click.ClickException(
                 f"docker-instance dockerd exited early (code {proc.returncode})"
                 + (f": {stderr.strip()[-2000:]}" if stderr.strip() else "")
@@ -806,12 +897,28 @@ def docker_instance_setup(
     log.info("docker-instance starting: %s", " ".join(cmd))
     log_path = (runtime_dir or short_base) / "dockerd.log"
     log_file = log_path.open("wb")
+    env = os.environ.copy()
+    env["PATH"] = daemon_tool_path(env.get("PATH"))
+    # region agent log
+    _dbg(
+        "H-path",
+        "docker_instance.py:docker_instance_setup",
+        "daemon PATH",
+        {
+            "runId": "post-fix",
+            "which_default": shutil.which("iptables"),
+            "which_sbin": which("iptables"),
+            "path": env["PATH"],
+        },
+    )
+    # endregion
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=log_file,
         start_new_session=True,
+        env=env,
     )
     proxy: DockerProxyServer | None = None
     try:

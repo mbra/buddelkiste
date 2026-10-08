@@ -124,24 +124,24 @@ def test_with_share_net_idempotent_and_without_unshare() -> None:
 
 def test_find_net_helper_and_ensure_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "buddelkiste.network.shutil.which",
+        "buddelkiste.network.which",
         lambda name: {"slirp4netns": "/bin/slirp"}.get(name),
     )
     assert find_net_helper() == ("slirp4netns", "/bin/slirp")
 
-    monkeypatch.setattr("buddelkiste.network.shutil.which", lambda name: None)
+    monkeypatch.setattr("buddelkiste.network.which", lambda name: None)
     with pytest.raises(click.ClickException, match="pasta|slirp4netns"):
         find_net_helper()
 
     monkeypatch.setattr(
-        "buddelkiste.network.shutil.which",
+        "buddelkiste.network.which",
         lambda name: {"pasta": "/bin/pasta"}.get(name),
     )
     with pytest.raises(click.ClickException, match="nft"):
         ensure_filter_tools()
 
     monkeypatch.setattr(
-        "buddelkiste.network.shutil.which",
+        "buddelkiste.network.which",
         lambda name: {"nft": "/bin/nft", "pasta": "/bin/pasta"}.get(name),
     )
     with pytest.raises(click.ClickException, match="setpriv"):
@@ -227,12 +227,12 @@ def test_start_slirp4netns_paths(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_run_network_inner_requires_tools(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("buddelkiste.network.shutil.which", lambda name: None)
+    monkeypatch.setattr("buddelkiste.network.which", lambda name: None)
     with pytest.raises(click.ClickException, match="nft"):
         run_network_inner(NetworkConfig(mode="filter"), ["bwrap"], start_slirp=False)
 
     monkeypatch.setattr(
-        "buddelkiste.network.shutil.which",
+        "buddelkiste.network.which",
         lambda name: {"nft": "/bin/nft"}.get(name),
     )
     with pytest.raises(click.ClickException, match="setpriv"):
@@ -241,7 +241,7 @@ def test_run_network_inner_requires_tools(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_run_network_inner_without_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "buddelkiste.network.shutil.which",
+        "buddelkiste.network.which",
         lambda name: f"/bin/{name}",
     )
     monkeypatch.setattr("buddelkiste.network.resolv_conf_nameservers", list)
@@ -267,7 +267,7 @@ def test_run_network_inner_with_proxy_and_slirp(
         "setpriv": "/bin/setpriv",
         "slirp4netns": "/bin/slirp",
     }
-    monkeypatch.setattr("buddelkiste.network.shutil.which", lambda name: which_map.get(name))
+    monkeypatch.setattr("buddelkiste.network.which", lambda name: which_map.get(name))
 
     slirp = MagicMock()
     slirp.poll.return_value = None
@@ -315,7 +315,7 @@ def test_run_network_inner_with_proxy_and_slirp(
 
 def test_run_network_inner_missing_slirp(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "buddelkiste.network.shutil.which",
+        "buddelkiste.network.which",
         lambda name: {"nft": "/bin/nft", "setpriv": "/bin/setpriv"}.get(name),
     )
     with pytest.raises(click.ClickException, match="slirp4netns is required"):
@@ -337,7 +337,7 @@ def test_run_bwrap_filter_slirp_branch(monkeypatch: pytest.MonkeyPatch) -> None:
         captured["args"] = list(args)
         return MagicMock(returncode=3)
 
-    monkeypatch.setattr("buddelkiste.network.shutil.which", which)
+    monkeypatch.setattr("buddelkiste.network.which", which)
     monkeypatch.setattr("buddelkiste.network.subprocess.run", fake_run)
     code = run_bwrap(
         ["bwrap", "--unshare-all", "--", "true"],
@@ -348,7 +348,7 @@ def test_run_bwrap_filter_slirp_branch(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "--start-slirp" in captured["args"]
 
     monkeypatch.setattr(
-        "buddelkiste.network.shutil.which",
+        "buddelkiste.network.which",
         lambda name: {
             "nft": "/usr/bin/nft",
             "setpriv": "/usr/bin/setpriv",

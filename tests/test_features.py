@@ -385,7 +385,7 @@ def test_dbus_proxy_feature_setup(
 ) -> None:
     (runtime_dir / "bus").touch()
     monkeypatch.setattr(
-        "buddelkiste.features.shutil.which",
+        "buddelkiste.features.which",
         lambda name: "/usr/bin/xdg-dbus-proxy" if name == "xdg-dbus-proxy" else None,
     )
     monkeypatch.setattr("buddelkiste.features.time.sleep", lambda _t: None)
@@ -428,7 +428,7 @@ def test_dbus_proxy_feature_requires_binary(
     runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (runtime_dir / "bus").touch()
-    monkeypatch.setattr("buddelkiste.features.shutil.which", lambda _name: None)
+    monkeypatch.setattr("buddelkiste.features.which", lambda _name: None)
     with pytest.raises(click.ClickException, match="xdg-dbus-proxy"), dbus_proxy_setup():
         pass
 
@@ -497,7 +497,7 @@ def test_check_feature_requirements_reports_missing_commands(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "buddelkiste.features.shutil.which",
+        "buddelkiste.features.which",
         lambda name: None if name in {"ssh-agent", "xdg-dbus-proxy"} else f"/bin/{name}",
     )
     enabled = {name: False for name in FEATURE_NAMES}

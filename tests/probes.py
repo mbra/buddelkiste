@@ -3,35 +3,36 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 from functools import cache
 from pathlib import Path
 
+from buddelkiste.which import which
+
 
 @cache
 def has_bwrap() -> bool:
-    return shutil.which("bwrap") is not None
+    return which("bwrap") is not None
 
 
 @cache
 def has_nft() -> bool:
-    return shutil.which("nft") is not None
+    return which("nft") is not None
 
 
 @cache
 def has_setpriv() -> bool:
-    return shutil.which("setpriv") is not None
+    return which("setpriv") is not None
 
 
 @cache
 def has_pasta() -> bool:
-    return shutil.which("pasta") is not None
+    return which("pasta") is not None
 
 
 @cache
 def has_slirp4netns() -> bool:
-    return shutil.which("slirp4netns") is not None
+    return which("slirp4netns") is not None
 
 
 @cache
@@ -46,7 +47,7 @@ def has_tun() -> bool:
 
 @cache
 def can_nested_user() -> bool:
-    if not shutil.which("unshare"):
+    if not which("unshare"):
         return False
     proc = subprocess.run(
         ["unshare", "--user", "--map-root-user", "true"],
@@ -58,7 +59,7 @@ def can_nested_user() -> bool:
 
 @cache
 def can_nested_net() -> bool:
-    if not shutil.which("unshare"):
+    if not which("unshare"):
         return False
     proc = subprocess.run(
         ["unshare", "--user", "--map-root-user", "--net", "true"],
@@ -118,7 +119,7 @@ def in_bwrap_sandbox() -> bool:
 @cache
 def has_docker() -> bool:
     """True when the Docker CLI can talk to a local unix engine socket."""
-    if shutil.which("docker") is None:
+    if which("docker") is None:
         return False
     sock = Path("/var/run/docker.sock")
     host = os.environ.get("DOCKER_HOST", "")
