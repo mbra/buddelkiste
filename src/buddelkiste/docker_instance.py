@@ -40,6 +40,7 @@ log = logging.getLogger(__name__)
 
 FS_MODES = frozenset({"host", "project", "data"})
 NET_MODES = frozenset({"host", "userspace", "none"})
+STORAGE_DRIVERS = frozenset({"auto", "overlay2", "fuse-overlayfs", "vfs"})
 
 # Instance defaults: allow build + BuildKit /session; deny other high-risk APIs.
 INSTANCE_API_DENY = ("commit", "swarm", "plugins")
@@ -79,6 +80,7 @@ class DockerInstanceConfig:
     net: str = "userspace"
     proxy: bool = True
     remove_data_on_teardown: bool = False
+    storage_driver: str = "auto"
     policy: DockerProxyPolicy = field(default_factory=lambda: _default_instance_policy())
 
 
@@ -110,7 +112,20 @@ def _apply_cli_overrides(cfg: DockerInstanceConfig) -> DockerInstanceConfig:
     updates: dict[str, Any] = {}
     if "remove_data_on_teardown" in raw:
         updates["remove_data_on_teardown"] = bool(raw["remove_data_on_teardown"])
+    if "storage_driver" in raw:
+        updates["storage_driver"] = parse_storage_driver(
+            raw["storage_driver"], where="--docker-instance-storage-driver"
+        )
     return replace(cfg, **updates) if updates else cfg
+
+
+def parse_storage_driver(raw: object, *, where: str) -> str:
+    """Normalize a storage-driver name; ``auto`` means omit dockerd's flag."""
+    driver = str(raw or "auto").strip() or "auto"
+    if driver not in STORAGE_DRIVERS:
+        allowed = ", ".join(sorted(STORAGE_DRIVERS))
+        raise click.ClickException(f"{where} must be one of {allowed} (got {driver!r})")
+    return driver
 
 
 def _default_instance_policy() -> DockerProxyPolicy:
@@ -336,6 +351,9 @@ def config_from_mapping(
 
     proxy = bool(data.get("proxy", True))
     remove_data_on_teardown = bool(data.get("remove_data_on_teardown", False))
+    storage_driver = parse_storage_driver(
+        data.get("storage_driver", "auto"), where=f"{where}.storage_driver"
+    )
 
     policy_raw = data.get("policy")
     if policy_raw is None:
@@ -352,6 +370,7 @@ def config_from_mapping(
         "net",
         "proxy",
         "remove_data_on_teardown",
+        "storage_driver",
         "policy",
     }
     if unknown:
@@ -365,6 +384,7 @@ def config_from_mapping(
         net=net,
         proxy=proxy,
         remove_data_on_teardown=remove_data_on_teardown,
+        storage_driver=storage_driver,
         policy=policy,
     )
 
@@ -583,6 +603,7 @@ def build_dockerd_command(
     project: Path,
     runtime_dir: Path,
     fs_allow: Sequence[Path],
+    storage_driver: str = "auto",
 ) -> list[str]:
     """Full argv to launch rootless dockerd (optional bwrap + rootlesskit)."""
     data_root.mkdir(parents=True, exist_ok=True)
@@ -596,6 +617,9 @@ def build_dockerd_command(
         f"--pidfile={pidfile}",
         f"-H=unix://{sock}",
     ]
+    driver = parse_storage_driver(storage_driver, where="storage_driver")
+    if driver != "auto":
+        dockerd.append(f"--storage-driver={driver}")
     # Bridge containers need iptables MASQUERADE + ip_forward to reach slirp
     # (10.0.2.3 DNS / default gw). Without them, pulls from dockerd still work
     # (daemon is in the rootlesskit netns) but RUN apt-get / DNS inside builds fail.
@@ -777,6 +801,7 @@ def docker_instance_setup(
         project=project,
         runtime_dir=short_base,
         fs_allow=fs_allow,
+        storage_driver=cfg.storage_driver,
     )
     log.info("docker-instance starting: %s", " ".join(cmd))
     log_path = (runtime_dir or short_base) / "dockerd.log"

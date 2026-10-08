@@ -121,11 +121,14 @@ docker_instance: Optional table for the docker-instance feature (project-local
 rootless dockerd). Keys: data_root (default under XDG_DATA_HOME), fs
 (host|project|data), fs_allow, net (host|userspace|none), proxy (default true),
 remove_data_on_teardown (default false; wipe data_root when the sandbox exits),
+storage_driver (auto|overlay2|fuse-overlayfs|vfs; auto omits dockerd's flag),
 and nested [docker_instance.policy] (same shape as docker_proxy, with instance
 defaults that allow build and images=["*"]). `bk docker-instance list` shows
 per-project store sizes; `bk docker-instance prune` deletes them. Mutually
 exclusive with docker and docker-proxy. Override remove_data_on_teardown for one
-run with --docker-instance-remove-data / --keep-docker-instance-data.
+run with --docker-instance-remove-data / --keep-docker-instance-data, and the
+storage driver with --docker-instance-storage-driver. Switching drivers on a
+non-empty data_root needs prune first.
 
 ## Example for a ~/.config/buddelkiste/config.toml configuration
 
@@ -201,6 +204,7 @@ error instead.
 
 from buddelkiste.binds import ROBindConfig, RWBindConfig, bind_config, get_bind_args
 from buddelkiste.conflicts import check_launch_conflicts
+from buddelkiste.docker_instance import STORAGE_DRIVERS
 from buddelkiste.features import (
     FEATURES,
     bind_from_spec,
@@ -302,6 +306,14 @@ def cli() -> None:
     "exits. Default keeps the store, unless [docker_instance] "
     "remove_data_on_teardown is true.",
 )
+@click.option(
+    "--docker-instance-storage-driver",
+    type=click.Choice(sorted(STORAGE_DRIVERS), case_sensitive=False),
+    default=None,
+    help="dockerd --storage-driver for docker-instance. auto (default) leaves "
+    "the choice to dockerd. Overlay2 and fuse-overlayfs cannot share a "
+    "data_root; prune before switching.",
+)
 @click.argument(
     "args",
     nargs=-1,
@@ -317,6 +329,7 @@ def run(
     net_deny: tuple[str, ...],
     net_deny_preset: tuple[str, ...],
     docker_instance_remove_data: bool | None,
+    docker_instance_storage_driver: str | None,
     args: list[str],
 ) -> None:
     logging.basicConfig(level="DEBUG" if debug else "WARNING")
@@ -354,6 +367,7 @@ def run(
     with (
         instance_cli_overrides(
             remove_data_on_teardown=docker_instance_remove_data,
+            storage_driver=docker_instance_storage_driver,
         ),
         feature_setup(enabled, config) as setup_parts,
         project_config_hide_args(project_config) as hide_args,

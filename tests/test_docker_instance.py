@@ -36,6 +36,7 @@ def test_config_defaults() -> None:
     assert cfg.net == "userspace"
     assert cfg.proxy is True
     assert cfg.remove_data_on_teardown is False
+    assert cfg.storage_driver == "auto"
     assert cfg.policy.images == ("*",)
     assert cfg.policy.api_deny == INSTANCE_API_DENY
     assert "build" not in cfg.policy.api_deny
@@ -51,6 +52,7 @@ def test_config_from_mapping_overrides(tmp_path: Path) -> None:
             "net": "none",
             "proxy": False,
             "remove_data_on_teardown": True,
+            "storage_driver": "fuse-overlayfs",
             "fs_allow": [str(tmp_path)],
             "policy": {
                 "images": ["alpine:*"],
@@ -63,6 +65,7 @@ def test_config_from_mapping_overrides(tmp_path: Path) -> None:
     assert cfg.net == "none"
     assert cfg.proxy is False
     assert cfg.remove_data_on_teardown is True
+    assert cfg.storage_driver == "fuse-overlayfs"
     assert cfg.fs_allow == (str(tmp_path),)
     assert cfg.policy.images == ("alpine:*",)
     assert cfg.policy.api_deny == ("build", "commit")
@@ -75,6 +78,8 @@ def test_config_rejects_bad_fs_net() -> None:
         config_from_mapping({"net": "bridge"})
     with pytest.raises(click.ClickException, match="unknown keys"):
         config_from_mapping({"extra": 1})
+    with pytest.raises(click.ClickException, match="storage_driver"):
+        config_from_mapping({"storage_driver": "btrfs"})
 
 
 def test_instance_policy_defaults_allow_build() -> None:
@@ -272,6 +277,7 @@ def test_build_dockerd_command_includes_rootlesskit(
     assert "--dns=9.9.9.9" in cmd
     assert any(a.startswith("--data-root=") for a in cmd)
     assert any(a.startswith("-H=unix://") for a in cmd)
+    assert not any(a.startswith("--storage-driver=") for a in cmd)
 
 
 def test_build_dockerd_command_with_fs_jail(
@@ -299,6 +305,28 @@ def test_build_dockerd_command_with_fs_jail(
     assert "bwrap" in cmd
     assert cmd.index("rootlesskit") < cmd.index("bwrap")
     assert "dockerd" in cmd
+
+
+def test_build_dockerd_command_storage_driver(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "buddelkiste.docker_instance.rootlesskit_net_args",
+        lambda net: ["--net=none"],
+    )
+    cmd = build_dockerd_command(
+        data_root=tmp_path / "data",
+        exec_root=tmp_path / "exec",
+        pidfile=tmp_path / "exec" / "dockerd.pid",
+        sock=tmp_path / "run" / "docker.sock",
+        net="none",
+        fs="host",
+        project=tmp_path / "proj",
+        runtime_dir=tmp_path / "run",
+        fs_allow=(),
+        storage_driver="fuse-overlayfs",
+    )
+    assert "--storage-driver=fuse-overlayfs" in cmd
 
 
 def test_expand_fs_allow_missing(tmp_path: Path) -> None:
@@ -636,6 +664,9 @@ def test_cli_overrides_remove_data_on_teardown() -> None:
     with instance_cli_overrides(remove_data_on_teardown=True):
         assert _apply_cli_overrides(cfg).remove_data_on_teardown is True
     assert _apply_cli_overrides(cfg).remove_data_on_teardown is False
+    with instance_cli_overrides(storage_driver="overlay2"):
+        assert _apply_cli_overrides(cfg).storage_driver == "overlay2"
+    assert _apply_cli_overrides(cfg).storage_driver == "auto"
 
 
 def test_docker_instance_setup_removes_data_on_teardown(

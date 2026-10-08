@@ -436,7 +436,10 @@ can be deleted.
 
 Requires: `dockerd`, `rootlesskit`, `newuidmap`/`newgidmap`, `/etc/subuid` and
 `/etc/subgid` entries for your user; for `net = "userspace"` also `pasta`
-(passt) or `slirp4netns`. `fuse-overlayfs` is recommended for storage.
+(passt) or `slirp4netns`. Storage defaults to whatever dockerd picks (`auto`);
+set `storage_driver` (or `--docker-instance-storage-driver`) to `overlay2`,
+`fuse-overlayfs`, or `vfs`. Do not switch drivers on a non-empty `data_root`
+without pruning first.
 
 ```bash
 bk run --no-feature docker --feature docker-instance docker version
@@ -456,6 +459,7 @@ net = "userspace"       # host | userspace | none
 # fs_allow = ["$HOME/.cache/go-build"]
 proxy = true            # agent sees only the filtered proxy socket
 # remove_data_on_teardown = true  # wipe data_root when bk run exits
+# storage_driver = "fuse-overlayfs"  # auto | overlay2 | fuse-overlayfs | vfs
 
 # Optional; defaults allow build + /session and images=["*"] on this private daemon
 # [docker_instance.policy]
