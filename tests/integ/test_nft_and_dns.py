@@ -49,7 +49,8 @@ def test_apply_nft_and_dyn_allow_via_our_helpers() -> None:
                 allow=["1.1.1.1/32"],
                 deny=["10.0.0.0/8"],
             ),
-            dns_proxy=True,
+            # Nested user+net ns cannot install nft NAT redirect.
+            dns_proxy=False,
         )
         apply_nft_ruleset(rules)
         nft_add_allow_ip("9.9.9.9", 30)
@@ -63,8 +64,6 @@ def test_apply_nft_and_dyn_allow_via_our_helpers() -> None:
             "dyn_allow6",
             "9.9.9.9",
             "2001:db8::9",
-            "dns_redirect",
-            "redirect to :15353",
         ):
             if needle not in listed:
                 raise SystemExit(f"missing {needle!r} in:\\n{listed}")
@@ -82,7 +81,7 @@ def test_apply_nft_and_dyn_allow_via_our_helpers() -> None:
 
 @pytest.mark.requires_nested_net
 def test_udp53_redirect_hits_dns_proxy() -> None:
-    """nft UDP/53 redirect + DnsProxy must intercept queries in a nested netns."""
+    """DnsProxy on UDP/53 must intercept queries in a nested netns (no nft NAT)."""
     if not can_nested_nft():
         pytest.skip("nft in nested netns not available")
 
@@ -92,7 +91,7 @@ def test_udp53_redirect_hits_dns_proxy() -> None:
         import struct
         import time
 
-        from buddelkiste.dns_proxy import DnsProxy, DNS_PROXY_PORT
+        from buddelkiste.dns_proxy import DnsProxy
         from buddelkiste.network import NetworkConfig, apply_nft_ruleset, build_nft_ruleset
 
         seen: list[str] = []
@@ -155,7 +154,7 @@ def test_udp53_redirect_hits_dns_proxy() -> None:
         rules = build_nft_ruleset(
             NetworkConfig(mode="filter", policy="deny", allow_hosts=["example.com"]),
             extra_allow=["127.0.0.1/32"],
-            dns_proxy=True,
+            dns_proxy=False,
         )
         apply_nft_ruleset(rules)
 
@@ -164,15 +163,16 @@ def test_udp53_redirect_hits_dns_proxy() -> None:
             allow_hosts=["example.com"],
             deny_hosts=[],
             add_allow_ip=add_allow,
-            listen_port=DNS_PROXY_PORT,
+            listen_host="127.0.0.1",
+            listen_port=53,
         )
         proxy.start()
         try:
             import subprocess
             subprocess.run(["ip", "link", "set", "lo", "up"], check=True)
 
-            # Empty netns has no default route, so target 127.0.0.1:53 — nft
-            # output NAT redirect still rewrites UDP/53 to the proxy port.
+            # Nested netns cannot install nft NAT redirect; listen on UDP/53
+            # the same way run_network_inner does when port 53 is free.
             q = bytearray(struct.pack("!HHHHHH", 0xBEEF, 0x0100, 1, 0, 0, 0))
             for label in b"example.com".split(b"."):
                 q.append(len(label))
