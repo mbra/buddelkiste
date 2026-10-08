@@ -428,7 +428,11 @@ The control socket is **not** mounted into the sandbox — `pending` /
 store for this project, then (by default) puts the filtered API proxy in front
 and binds only that socket into the sandbox. Images and volumes live under
 `$XDG_DATA_HOME/buddelkiste/docker-instance/<project-key>/` (override with
-`data_root`) and do not touch the user-global Docker engine.
+`data_root`) and do not touch the user-global Docker engine. The store is kept
+when the sandbox exits unless `remove_data_on_teardown = true` (or
+`bk run --docker-instance-remove-data`). Overlay snapshot work dirs are left
+mode `000`; `bk docker-instance prune` (and teardown wipe) chmod them so they
+can be deleted.
 
 Requires: `dockerd`, `rootlesskit`, `newuidmap`/`newgidmap`, `/etc/subuid` and
 `/etc/subgid` entries for your user; for `net = "userspace"` also `pasta`
@@ -436,6 +440,10 @@ Requires: `dockerd`, `rootlesskit`, `newuidmap`/`newgidmap`, `/etc/subuid` and
 
 ```bash
 bk run --no-feature docker --feature docker-instance docker version
+bk docker-instance list
+bk docker-instance prune                  # current project (prompts)
+bk docker-instance prune --all -y         # every default-home store
+bk docker-instance prune proj-abc123 -y   # by directory name
 ```
 
 ```toml
@@ -447,6 +455,7 @@ net = "userspace"       # host | userspace | none
 # data_root = "/path/to/store"
 # fs_allow = ["$HOME/.cache/go-build"]
 proxy = true            # agent sees only the filtered proxy socket
+# remove_data_on_teardown = true  # wipe data_root when bk run exits
 
 # Optional; defaults allow build + /session and images=["*"] on this private daemon
 # [docker_instance.policy]

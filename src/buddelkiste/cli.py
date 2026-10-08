@@ -120,9 +120,12 @@ exclusive with the raw docker and docker-instance features.
 docker_instance: Optional table for the docker-instance feature (project-local
 rootless dockerd). Keys: data_root (default under XDG_DATA_HOME), fs
 (host|project|data), fs_allow, net (host|userspace|none), proxy (default true),
+remove_data_on_teardown (default false; wipe data_root when the sandbox exits),
 and nested [docker_instance.policy] (same shape as docker_proxy, with instance
-defaults that allow build and images=["*"]). Mutually exclusive with docker and
-docker-proxy.
+defaults that allow build and images=["*"]). `bk docker-instance list` shows
+per-project store sizes; `bk docker-instance prune` deletes them. Mutually
+exclusive with docker and docker-proxy. Override remove_data_on_teardown for one
+run with --docker-instance-remove-data / --keep-docker-instance-data.
 
 ## Example for a ~/.config/buddelkiste/config.toml configuration
 
@@ -291,6 +294,14 @@ def cli() -> None:
     help="Deny a named preset (built-in or from [network.presets]). "
     "Implies --network filter. Repeatable. See `bk list-net-presets`.",
 )
+@click.option(
+    "--docker-instance-remove-data/--keep-docker-instance-data",
+    "docker_instance_remove_data",
+    default=None,
+    help="Delete this project's docker-instance data_root when the sandbox "
+    "exits. Default keeps the store, unless [docker_instance] "
+    "remove_data_on_teardown is true.",
+)
 @click.argument(
     "args",
     nargs=-1,
@@ -305,6 +316,7 @@ def run(
     net_allow: tuple[str, ...],
     net_deny: tuple[str, ...],
     net_deny_preset: tuple[str, ...],
+    docker_instance_remove_data: bool | None,
     args: list[str],
 ) -> None:
     logging.basicConfig(level="DEBUG" if debug else "WARNING")
@@ -337,7 +349,12 @@ def run(
 
     bind_args = get_bind_args(binds)
 
+    from buddelkiste.docker_instance import instance_cli_overrides
+
     with (
+        instance_cli_overrides(
+            remove_data_on_teardown=docker_instance_remove_data,
+        ),
         feature_setup(enabled, config) as setup_parts,
         project_config_hide_args(project_config) as hide_args,
     ):
@@ -505,6 +522,85 @@ def docker_policy_deny(target: str | None) -> None:
     if not resp.get("ok"):
         raise click.ClickException(str(resp.get("error") or "deny failed"))
     click.echo(f"Denied {resp.get('image')} (id={resp.get('id')})")
+
+
+@cli.group("docker-instance")
+def docker_instance_group() -> None:
+    """List and prune project-local docker-instance image stores."""
+
+
+@docker_instance_group.command("list")
+def docker_instance_list() -> None:
+    """Print per-project docker-instance store sizes.
+
+    Scans ``$XDG_DATA_HOME/buddelkiste/docker-instance/`` and also includes the
+    current project's ``data_root`` when it lives elsewhere. The current store
+    is marked with ``*``.
+    """
+    from buddelkiste.docker_instance import format_bytes, list_instance_stores
+
+    stores = list_instance_stores(config=load_config())
+    if not stores:
+        click.echo("No docker-instance stores.")
+        return
+    for store in stores:
+        mark = "*" if store.current else " "
+        click.echo(
+            f"{format_bytes(store.size):>8}  {mark} {store.name}\t{store.path}"
+        )
+
+
+@docker_instance_group.command("prune")
+@click.argument("names", nargs=-1)
+@click.option(
+    "--all",
+    "all_stores",
+    is_flag=True,
+    help="Remove every store under the default docker-instance data home.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Print paths that would be removed without deleting them.",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Do not prompt for confirmation.",
+)
+def docker_instance_prune(
+    names: tuple[str, ...],
+    all_stores: bool,
+    dry_run: bool,
+    yes: bool,
+) -> None:
+    """Remove docker-instance data_roots (overlay leftovers included).
+
+    With no NAMES, prune the current project's store (config data_root or the
+    default path). NAMES are directory names under the default data home.
+    Uses a chmod+unlink walk so kernel overlay work dirs (mode 000) go away.
+    """
+    from buddelkiste.docker_instance import prune_instance_stores, resolve_prune_targets
+
+    targets = resolve_prune_targets(
+        names, all_stores=all_stores, config=load_config()
+    )
+    existing = [path for path in targets if path.exists()]
+    if not existing:
+        click.echo("Nothing to prune.")
+        return
+    for path in existing:
+        click.echo(str(path))
+    if dry_run:
+        click.echo(f"Would remove {len(existing)} store(s).")
+        return
+    if not yes and not click.confirm(
+        f"Remove {len(existing)} docker-instance store(s)?", default=False
+    ):
+        raise click.Abort()
+    removed = prune_instance_stores(existing)
+    click.echo(f"Removed {len(removed)} store(s).")
 
 
 @cli.group("shims")

@@ -17,7 +17,8 @@ import subprocess
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +64,11 @@ _MINIMAL_RO_BINDS = (
 )
 
 
+_cli_overrides: ContextVar[dict[str, Any] | None] = ContextVar(
+    "bk_docker_instance_cli", default=None
+)
+
+
 @dataclass(frozen=True)
 class DockerInstanceConfig:
     """Settings for a project-local rootless Docker daemon."""
@@ -72,7 +78,39 @@ class DockerInstanceConfig:
     fs_allow: tuple[str, ...] = ()
     net: str = "userspace"
     proxy: bool = True
+    remove_data_on_teardown: bool = False
     policy: DockerProxyPolicy = field(default_factory=lambda: _default_instance_policy())
+
+
+@dataclass(frozen=True)
+class InstanceStore:
+    """One project-local docker-instance data_root on disk."""
+
+    name: str
+    path: Path
+    size: int
+    current: bool = False
+
+
+@contextmanager
+def instance_cli_overrides(**kwargs: Any) -> Iterator[None]:
+    """Apply ``bk run`` flags on top of ``[docker_instance]`` for this process."""
+    filtered = {key: value for key, value in kwargs.items() if value is not None}
+    token = _cli_overrides.set(filtered)
+    try:
+        yield
+    finally:
+        _cli_overrides.reset(token)
+
+
+def _apply_cli_overrides(cfg: DockerInstanceConfig) -> DockerInstanceConfig:
+    raw = _cli_overrides.get()
+    if not raw:
+        return cfg
+    updates: dict[str, Any] = {}
+    if "remove_data_on_teardown" in raw:
+        updates["remove_data_on_teardown"] = bool(raw["remove_data_on_teardown"])
+    return replace(cfg, **updates) if updates else cfg
 
 
 def _default_instance_policy() -> DockerProxyPolicy:
@@ -92,9 +130,142 @@ def _xdg_data_home() -> Path:
     return Path.home() / ".local" / "share"
 
 
+def instance_store_home() -> Path:
+    """Parent directory of default per-project docker-instance stores."""
+    return _xdg_data_home() / "buddelkiste" / "docker-instance"
+
+
 def default_data_root(key: str | None = None) -> Path:
     """Default store: ``$XDG_DATA_HOME/buddelkiste/docker-instance/<key>``."""
-    return _xdg_data_home() / "buddelkiste" / "docker-instance" / (key or project_policy_key())
+    return instance_store_home() / (key or project_policy_key())
+
+
+def directory_size_bytes(path: Path) -> int:
+    """Best-effort recursive size; skips unreadable overlay work dirs."""
+    try:
+        st = path.lstat()
+    except OSError:
+        return 0
+    total = st.st_size
+    if path.is_symlink() or not path.is_dir():
+        return total
+    try:
+        children = list(path.iterdir())
+    except OSError:
+        return total
+    for child in children:
+        total += directory_size_bytes(child)
+    return total
+
+
+def format_bytes(n: int) -> str:
+    """Human-readable byte count (binary units)."""
+    size = float(n)
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    unit = units[0]
+    for unit in units:
+        if size < 1024.0 or unit == units[-1]:
+            break
+        size /= 1024.0
+    if unit == "B":
+        return f"{n}B"
+    return f"{size:.1f}{unit}"
+
+
+def list_instance_stores(
+    *,
+    config: Mapping[str, Any] | None = None,
+    current_key: str | None = None,
+) -> list[InstanceStore]:
+    """Stores under the default home, plus the current project's data_root."""
+    key = current_key or project_policy_key()
+    cfg = load_instance_config(config)
+    current_root = (cfg.data_root or default_data_root(key)).resolve()
+    found: dict[Path, InstanceStore] = {}
+    home = instance_store_home()
+    if home.is_dir():
+        for child in sorted(home.iterdir(), key=lambda p: p.name):
+            if not child.is_dir() or child.is_symlink():
+                continue
+            resolved = child.resolve()
+            found[resolved] = InstanceStore(
+                name=child.name,
+                path=child,
+                size=directory_size_bytes(child),
+                current=resolved == current_root,
+            )
+    if current_root.exists() and current_root.is_dir() and current_root not in found:
+        found[current_root] = InstanceStore(
+            name=key,
+            path=current_root,
+            size=directory_size_bytes(current_root),
+            current=True,
+        )
+    elif current_root in found:
+        store = found[current_root]
+        found[current_root] = InstanceStore(
+            name=store.name,
+            path=store.path,
+            size=store.size,
+            current=True,
+        )
+    return sorted(found.values(), key=lambda s: s.name)
+
+
+def resolve_prune_targets(
+    names: Sequence[str],
+    *,
+    all_stores: bool = False,
+    config: Mapping[str, Any] | None = None,
+) -> list[Path]:
+    """Resolve prune names, ``--all``, or the current project's data_root."""
+    if all_stores and names:
+        raise click.ClickException("pass store names or --all, not both")
+    home = instance_store_home()
+    if all_stores:
+        if not home.is_dir():
+            return []
+        return [
+            child
+            for child in sorted(home.iterdir(), key=lambda p: p.name)
+            if child.is_dir() and not child.is_symlink()
+        ]
+    if names:
+        missing: list[str] = []
+        targets: list[Path] = []
+        home_resolved = home.resolve() if home.exists() else home
+        for name in names:
+            if name in {".", ".."} or "/" in name or os.sep in name:
+                raise click.ClickException(f"invalid store name: {name!r}")
+            path = home / name
+            if not path.exists():
+                missing.append(name)
+                continue
+            resolved = path.resolve()
+            if home_resolved not in resolved.parents and resolved != home_resolved:
+                raise click.ClickException(
+                    f"refusing to prune path outside instance store: {path}"
+                )
+            targets.append(path)
+        if missing:
+            raise click.ClickException(
+                "unknown docker-instance stores: " + ", ".join(missing)
+            )
+        return targets
+    cfg = load_instance_config(config)
+    return [(cfg.data_root or default_data_root()).resolve()]
+
+
+def prune_instance_stores(paths: Sequence[Path]) -> list[Path]:
+    """``force_rmtree`` each existing path; return those that were removed."""
+    from buddelkiste.binds import force_rmtree
+
+    removed: list[Path] = []
+    for path in paths:
+        if path.exists():
+            force_rmtree(path)
+            removed.append(path)
+    return removed
 
 
 def project_root(start: Path | None = None) -> Path:
@@ -164,6 +335,7 @@ def config_from_mapping(
         data_root = Path(os.path.expandvars(str(data_root_raw))).expanduser()
 
     proxy = bool(data.get("proxy", True))
+    remove_data_on_teardown = bool(data.get("remove_data_on_teardown", False))
 
     policy_raw = data.get("policy")
     if policy_raw is None:
@@ -179,6 +351,7 @@ def config_from_mapping(
         "fs_allow",
         "net",
         "proxy",
+        "remove_data_on_teardown",
         "policy",
     }
     if unknown:
@@ -191,6 +364,7 @@ def config_from_mapping(
         fs_allow=fs_allow,
         net=net,
         proxy=proxy,
+        remove_data_on_teardown=remove_data_on_teardown,
         policy=policy,
     )
 
@@ -575,7 +749,7 @@ def docker_instance_setup(
 ) -> Iterator[Sequence[str]]:
     """Start project dockerd (+ optional proxy) and yield agent bwrap args."""
     check_rootless_prerequisites()
-    cfg = instance or load_instance_config(config)
+    cfg = instance or _apply_cli_overrides(load_instance_config(config))
     key = project_policy_key()
     data_root = (cfg.data_root or default_data_root(key)).resolve()
     project = project_root()
@@ -668,3 +842,7 @@ def docker_instance_setup(
             shutil.rmtree(short_base, ignore_errors=True)
         except OSError:
             pass
+        if cfg.remove_data_on_teardown:
+            from buddelkiste.binds import force_rmtree
+
+            force_rmtree(data_root)
