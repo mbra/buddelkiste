@@ -7,7 +7,7 @@ import subprocess
 from functools import cache
 from pathlib import Path
 
-from buddelkiste.which import which
+from buddelkiste.which import path_with_tools, which
 
 
 @cache
@@ -69,6 +69,13 @@ def can_nested_net() -> bool:
     return proc.returncode == 0
 
 
+def env_with_host_tools() -> dict[str, str]:
+    """Environment whose PATH can exec host tools that live in sbin."""
+    env = os.environ.copy()
+    env["PATH"] = path_with_tools(("nft", "ip", "setpriv"), env.get("PATH"))
+    return env
+
+
 @cache
 def can_nested_nft() -> bool:
     if not (has_nft() and can_nested_net()):
@@ -88,6 +95,7 @@ def can_nested_nft() -> bool:
         text=True,
         check=False,
         capture_output=True,
+        env=env_with_host_tools(),
     )
     return proc.returncode == 0
 

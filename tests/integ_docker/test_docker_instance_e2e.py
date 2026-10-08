@@ -68,6 +68,16 @@ def _prepare_env(
         encoding="utf-8",
     )
     monkeypatch.setenv("HOME", str(home))
+    # Docker CLI 29 picks secretservice when the config has no auths. That
+    # helper aborts if the secret service is down, so pulls never start.
+    # An auth map entry selects the file store and allows anonymous pulls.
+    monkeypatch.delenv("DOCKER_CONFIG", raising=False)
+    docker_cfg = home / ".docker"
+    docker_cfg.mkdir()
+    (docker_cfg / "config.json").write_text(
+        '{"auths":{"https://index.docker.io/v1/":{}}}\n',
+        encoding="utf-8",
+    )
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(run))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
     monkeypatch.chdir(project)

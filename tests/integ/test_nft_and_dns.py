@@ -10,7 +10,7 @@ import textwrap
 
 import pytest
 
-from tests.probes import can_nested_nft, has_outbound_network
+from tests.probes import can_nested_nft, env_with_host_tools, has_outbound_network
 
 pytestmark = pytest.mark.integration
 
@@ -75,6 +75,7 @@ def test_apply_nft_and_dyn_allow_via_our_helpers() -> None:
         check=False,
         capture_output=True,
         text=True,
+        env=env_with_host_tools(),
     )
     assert proc.returncode == 0, proc.stderr or proc.stdout
 
@@ -204,6 +205,7 @@ def test_udp53_redirect_hits_dns_proxy() -> None:
         check=False,
         capture_output=True,
         text=True,
+        env=env_with_host_tools(),
     )
     assert proc.returncode == 0, proc.stderr or proc.stdout
 

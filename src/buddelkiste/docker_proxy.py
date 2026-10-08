@@ -320,6 +320,58 @@ def write_policy_file(path: Path, policy: DockerProxyPolicy) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def _docker_config_dir() -> Path:
+    configured = os.environ.get("DOCKER_CONFIG", "")
+    if configured:
+        return Path(configured)
+    return Path.home() / ".docker"
+
+
+def _context_unix_socket() -> Path | None:
+    """Unix socket for the active docker context when ``DOCKER_HOST`` is unset.
+
+    The docker CLI uses ``currentContext`` in that case. A rootless context
+    points at ``/run/user/$UID/docker.sock``. Falling through to
+    ``/var/run/docker.sock`` then fails with EPERM for a user who is not in
+    the docker group, even though ``docker version`` itself works.
+    """
+    root = _docker_config_dir()
+    name = os.environ.get("DOCKER_CONTEXT", "")
+    if not name:
+        cfg_path = root / "config.json"
+        if not cfg_path.is_file():
+            return None
+        try:
+            data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        raw = data.get("currentContext")
+        name = raw if isinstance(raw, str) else ""
+    if not name or name == "default":
+        return None
+    meta_root = root / "contexts" / "meta"
+    if not meta_root.is_dir():
+        return None
+    for meta in meta_root.glob("*/meta.json"):
+        try:
+            payload = json.loads(meta.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if payload.get("Name") != name:
+            continue
+        endpoints = payload.get("Endpoints")
+        docker_ep = endpoints.get("docker") if isinstance(endpoints, dict) else None
+        host = docker_ep.get("Host") if isinstance(docker_ep, dict) else ""
+        if not isinstance(host, str) or not host:
+            return None
+        if host.startswith("unix://"):
+            return Path(host.removeprefix("unix://"))
+        raise click.ClickException(
+            f"docker context {name!r} endpoint is not a unix socket ({host!r})"
+        )
+    return None
+
+
 def resolve_docker_socket() -> Path:
     host = os.environ.get("DOCKER_HOST", "")
     if host.startswith("unix://"):
@@ -328,7 +380,7 @@ def resolve_docker_socket() -> Path:
         raise click.ClickException(
             f"docker-proxy only supports unix:// DOCKER_HOST (got {host!r})"
         )
-    return Path("/var/run/docker.sock")
+    return _context_unix_socket() or Path("/var/run/docker.sock")
 
 
 def _strip_api_prefix(path: str) -> str:

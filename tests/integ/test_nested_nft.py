@@ -7,7 +7,7 @@ import textwrap
 import pytest
 
 from buddelkiste.network import NetworkConfig, build_nft_ruleset
-from tests.probes import can_nested_nft
+from tests.probes import can_nested_nft, env_with_host_tools
 
 pytestmark = pytest.mark.integration
 
@@ -53,6 +53,7 @@ def test_apply_nft_ruleset_in_nested_netns() -> None:
         check=False,
         capture_output=True,
         text=True,
+        env=env_with_host_tools(),
     )
     assert proc.returncode == 0, proc.stderr
 

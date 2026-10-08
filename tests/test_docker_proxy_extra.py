@@ -118,14 +118,37 @@ def test_declaration_from_config() -> None:
     assert decl.images == ("a:1",)
 
 
-def test_resolve_docker_socket_variants(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_docker_socket_variants(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setenv("DOCKER_HOST", "unix:///tmp/custom.sock")
     assert resolve_docker_socket() == Path("/tmp/custom.sock")
     monkeypatch.setenv("DOCKER_HOST", "tcp://127.0.0.1:2375")
     with pytest.raises(click.ClickException, match="only supports unix://"):
         resolve_docker_socket()
     monkeypatch.delenv("DOCKER_HOST")
+    monkeypatch.delenv("DOCKER_CONTEXT", raising=False)
+    monkeypatch.setenv("DOCKER_CONFIG", str(tmp_path / "empty-docker"))
     assert resolve_docker_socket() == Path("/var/run/docker.sock")
+
+
+def test_resolve_docker_socket_uses_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cfg = tmp_path / "docker"
+    meta = cfg / "contexts" / "meta" / "abc"
+    meta.mkdir(parents=True)
+    (cfg / "config.json").write_text(
+        '{"currentContext": "rootless"}\n', encoding="utf-8"
+    )
+    (meta / "meta.json").write_text(
+        '{"Name": "rootless", "Endpoints": {"docker": {"Host": "unix:///run/user/1/docker.sock"}}}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    monkeypatch.delenv("DOCKER_CONTEXT", raising=False)
+    monkeypatch.setenv("DOCKER_CONFIG", str(cfg))
+    assert resolve_docker_socket() == Path("/run/user/1/docker.sock")
 
 
 def test_path_categories() -> None:

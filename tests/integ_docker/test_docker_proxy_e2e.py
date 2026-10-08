@@ -144,14 +144,31 @@ def test_proxy_loads_policy_from_host_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("DOCKER_HOST", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    (tmp_path / "home").mkdir()
+    # Pull while the real docker context is still visible. A fresh HOME has
+    # no currentContext, so the CLI falls back to /var/run/docker.sock, which
+    # this user cannot open (the working engine is the rootless context).
+    from buddelkiste.docker_proxy import (
+        host_policy_path,
+        project_policy_key,
+        resolve_docker_socket,
+    )
+
+    _ensure_image(ALPINE)
+    upstream = resolve_docker_socket()
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    home.mkdir()
+    monkeypatch.delenv("DOCKER_CONFIG", raising=False)
+    monkeypatch.setenv("DOCKER_HOST", f"unix://{upstream}")
+    docker_cfg = home / ".docker"
+    docker_cfg.mkdir()
+    (docker_cfg / "config.json").write_text(
+        '{"auths":{"https://index.docker.io/v1/":{}}}\n',
+        encoding="utf-8",
+    )
     work = tmp_path / "work"
     work.mkdir()
     monkeypatch.chdir(work)
-    _ensure_image(ALPINE)
-
-    from buddelkiste.docker_proxy import host_policy_path, project_policy_key
 
     key = project_policy_key()
     # deny so the unlisted busybox run fails immediately (session would hold).
