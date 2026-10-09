@@ -247,20 +247,22 @@ def test_host_dns_servers_skips_loopback_and_ipv6(tmp_path: Path) -> None:
     assert host_dns_servers(resolv) == ["192.168.1.1", "1.1.1.1"]
 
 
-def test_daemon_tool_path_prepends_sbin_when_iptables_is_there(
+def test_daemon_tool_path_prepends_dir_when_tools_are_outside_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    sbin = tmp_path / "sbin"
-    sbin.mkdir()
+    path_dir = tmp_path / "path"
+    extra_dir = tmp_path / "extra"
+    path_dir.mkdir()
+    extra_dir.mkdir()
     for name in ("iptables", "ip6tables", "nft", "sysctl"):
-        tool = sbin / name
+        tool = extra_dir / name
         tool.write_text("#!/bin/sh\n", encoding="utf-8")
         tool.chmod(0o755)
-    monkeypatch.setenv("PATH", "/usr/bin")
-    monkeypatch.setattr("buddelkiste.which.SBIN_DIRS", (str(sbin),))
+    monkeypatch.setenv("PATH", str(path_dir))
+    monkeypatch.setattr("buddelkiste.which.SBIN_DIRS", (str(extra_dir),))
     parts = daemon_tool_path().split(os.pathsep)
-    assert parts[0] == str(sbin)
-    assert "/usr/bin" in parts
+    assert parts[0] == str(extra_dir)
+    assert str(path_dir) in parts
 
 
 def test_daemon_tool_path_keeps_existing_bin_dir(
